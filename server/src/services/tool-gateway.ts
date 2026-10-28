@@ -6075,7 +6075,11 @@ export function createToolGatewayService(
           });
         } catch (error) {
           if (!(error instanceof McpHttpInitializationError) || !error.response) throw error;
-          initializeFailure = error.response;
+          // Concurrent calls in this scope share one initialize and so one
+          // Response. Each reads its own clone; if the body is already taken,
+          // the initialization error branch in the catch below reports it.
+          if (error.response.bodyUsed || error.response.body?.locked) throw error;
+          initializeFailure = error.response.clone();
         }
         const sessionId = new Headers(requestHeaders).get("mcp-session-id");
         if (sessionId) mcpSession = { scope, headers, sessionId };
@@ -6360,7 +6364,8 @@ export function createToolGatewayService(
           },
         );
       }
-      // The initialized notification failed; initialize itself was handled above.
+      // The initialized notification failed, or a concurrent call already
+      // consumed a shared initialize failure; initialize is otherwise handled above.
       if (error instanceof McpHttpInitializationError && error.status !== null) {
         if (error.status === 401) {
           await markRemoteConnectionHealth(connection, "error", REMOTE_MCP_CREDENTIAL_REJECTED_MESSAGE);
