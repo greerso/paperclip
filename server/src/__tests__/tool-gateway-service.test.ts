@@ -1818,6 +1818,107 @@ describeEmbeddedPostgres("tool gateway service", () => {
     expect(vi.mocked(oauthGrantRefresher).mock.calls.some(([input]) => input.forceRefresh === true)).toBe(true);
   });
 
+  it("refreshes customer OAuth after a 401 on initialize and keeps the connection healthy", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    const { connection } = await createRemoteMcpToolFixture(db, company.id);
+    const accessSecret = await secretService(db).create(company.id, {
+      provider: "local_encrypted",
+      name: "Customer OAuth access token",
+      key: `gateway.oauth.${randomUUID()}`,
+      value: "stale-customer-token",
+    });
+    await db.insert(companySecretBindings).values({
+      companyId: company.id,
+      secretId: accessSecret.id,
+      targetType: "tool_connection",
+      targetId: connection.id,
+      configPath: "oauth.access_token",
+    });
+    await db.update(toolConnections).set({
+      authKind: "oauth",
+      credentialSource: "paperclip_vault",
+      credentialRefs: [{ name: "oauth.access_token", placement: "header", key: "Authorization", prefix: "Bearer ", secretId: accessSecret.id, versionSelector: "latest" }],
+      config: {
+        url: "https://example.invalid/mcp",
+        mcpSessionRequired: true,
+        oauth: {
+          provider: "fixture",
+          tokenUrl: "https://example.invalid/oauth/token",
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        },
+      },
+    }).where(eq(toolConnections.id, connection.id));
+    const [grant] = await db.select().from(connectionGrants).where(eq(
+      connectionGrants.connectionId,
+      connection.id,
+    ));
+    await db.update(connectionGrants).set({
+      credentialSecretRefs: [{
+        secretId: accessSecret.id,
+        versionSelector: "latest",
+        configPath: "oauth.access_token",
+        required: true,
+        label: "OAuth access token",
+      }],
+      providerTenant: {
+        oauth: {
+          strategy: "direct_oauth",
+          accessTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        },
+      },
+    }).where(eq(connectionGrants.id, grant.id));
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Allow customer OAuth reads",
+      policyType: "allow",
+      selectors: { riskLevel: "read" },
+    });
+
+    const oauthGrantRefresher: NonNullable<ToolGatewayServiceOptions["oauthGrantRefresher"]> = vi.fn(async (input) => {
+      if (input.forceRefresh) {
+        await secretService(db).rotate(accessSecret.id, { value: "fresh-customer-token" });
+      }
+      return db.select().from(connectionGrants).where(eq(connectionGrants.id, input.grantId))
+        .then((rows) => rows[0]!);
+    });
+    const methods: string[] = [];
+    const gateway = createTestToolGatewayService(db, {
+      oauthGrantRefresher,
+      remoteHttpRequest: async (_url, init) => {
+        const requestBody = JSON.parse(String(init.body)) as { method: string; id?: string };
+        methods.push(requestBody.method);
+        const fresh = new Headers(init.headers).get("authorization") === "Bearer fresh-customer-token";
+        if (requestBody.method === "initialize") {
+          if (!fresh) return new Response(null, { status: 401 });
+          return new Response(JSON.stringify({
+            jsonrpc: "2.0",
+            id: requestBody.id,
+            result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "oauth-session", version: "1" } },
+          }), { status: 200, headers: { "content-type": "application/json", "mcp-session-id": "fresh-session" } });
+        }
+        if (requestBody.method === "notifications/initialized") return new Response(null, { status: 202 });
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestBody.id,
+          result: { content: [{ type: "text", text: "customer OAuth result" }] },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const tool = (await gateway.listToolsForSession(session.token))
+      .find((candidate) => candidate.providerType === "mcp_remote_http");
+    const execute = () => gateway.executeTool({ sessionToken: session.token, tool: tool!.name, parameters: {} });
+
+    await expect(execute()).rejects.toMatchObject({ status: 409, reasonCode: "oauth_refreshed_retry_required" });
+    expect(methods).toEqual(["initialize"]);
+    const [afterRejection] = await db.select({ healthStatus: toolConnections.healthStatus }).from(toolConnections)
+      .where(eq(toolConnections.id, connection.id));
+    expect(afterRejection?.healthStatus).toBe("ok");
+
+    await expect(execute()).resolves.toMatchObject({ status: "completed" });
+    expect(methods).toEqual(["initialize", "initialize", "notifications/initialized", "tools/call"]);
+  });
+
   it("refreshes a managed OAuth grant after 401 without replaying the call", async () => {
     const { company, agent, run } = await createRunFixture(db);
     const { connection } = await createRemoteMcpToolFixture(db, company.id);

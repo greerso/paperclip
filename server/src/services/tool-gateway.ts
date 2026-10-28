@@ -6056,19 +6056,27 @@ export function createToolGatewayService(
         };
       }
       let requestHeaders = headers;
+      // A rejected initialize goes through the same scope, OAuth refresh and
+      // health handling below as a rejected tools/call.
+      let initializeFailure: Response | undefined;
       if (connectionRequiresMcpSession(connection)) {
         const scope = `${connection.id}:grant:${grant.id}:actor:${session.agentId}:${endpoint}`;
-        requestHeaders = await getMcpHttpSession({
-          scope,
-          send: (init) =>
-            dispatchRemote(endpoint, {
-              ...init,
-              redirect: "manual",
-              signal: controller.signal,
-            }),
-          headers,
-          requestId,
-        });
+        try {
+          requestHeaders = await getMcpHttpSession({
+            scope,
+            send: (init) =>
+              dispatchRemote(endpoint, {
+                ...init,
+                redirect: "manual",
+                signal: controller.signal,
+              }),
+            headers,
+            requestId,
+          });
+        } catch (error) {
+          if (!(error instanceof McpHttpInitializationError) || !error.response) throw error;
+          initializeFailure = error.response;
+        }
         const sessionId = new Headers(requestHeaders).get("mcp-session-id");
         if (sessionId) mcpSession = { scope, headers, sessionId };
       }
@@ -6093,7 +6101,7 @@ export function createToolGatewayService(
           },
         }),
       };
-      let response = await dispatchRemote(endpoint, requestInit);
+      let response = initializeFailure ?? await dispatchRemote(endpoint, requestInit);
       if (isInsufficientConnectionScope(response)) {
         await response.body?.cancel().catch(() => undefined);
         await markRemoteConnectionHealth(connection, "degraded", INSUFFICIENT_CONNECTION_SCOPE_MESSAGE);
@@ -6352,8 +6360,8 @@ export function createToolGatewayService(
           },
         );
       }
+      // The initialized notification failed; initialize itself was handled above.
       if (error instanceof McpHttpInitializationError && error.status !== null) {
-        await error.response?.body?.cancel().catch(() => undefined);
         if (error.status === 401) {
           await markRemoteConnectionHealth(connection, "error", REMOTE_MCP_CREDENTIAL_REJECTED_MESSAGE);
         }
