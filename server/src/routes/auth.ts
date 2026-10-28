@@ -3,7 +3,9 @@ import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { authUsers } from "@paperclipai/db";
 import {
+  authAccountSecuritySchema,
   authSessionSchema,
+  authSignInOptionsSchema,
   currentUserProfileSchema,
   updateCurrentUserProfileSchema,
 } from "@paperclipai/shared";
@@ -35,8 +37,34 @@ async function loadCurrentUserProfile(db: Db, userId: string) {
   });
 }
 
-export function authRoutes(db: Db) {
+export function authRoutes(db: Db, opts: { passkeyOrigin?: string | null } = {}) {
   const router = Router();
+
+  router.get("/sign-in-options", (_req, res) => {
+    res.json(authSignInOptionsSchema.parse({
+      passkeyOrigin: opts.passkeyOrigin ?? null,
+    }));
+  });
+
+  router.get("/account-security", async (req, res) => {
+    if (req.actor.type !== "board" || !req.actor.userId) {
+      throw unauthorized("Board authentication required");
+    }
+
+    const user = await db
+      .select({ twoFactorEnabled: authUsers.twoFactorEnabled })
+      .from(authUsers)
+      .where(eq(authUsers.id, req.actor.userId))
+      .then((rows) => rows[0] ?? null);
+
+    if (!user) {
+      throw unauthorized("Signed-in user not found");
+    }
+
+    res.json(authAccountSecuritySchema.parse({
+      twoFactorEnabled: user.twoFactorEnabled,
+    }));
+  });
 
   router.get("/get-session", async (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {

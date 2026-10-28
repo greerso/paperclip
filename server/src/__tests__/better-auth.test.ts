@@ -6,6 +6,8 @@ import {
   buildBetterAuthRateLimitOptions,
   deriveAuthCookiePrefix,
   deriveAuthTrustedOrigins,
+  resolveAuthPublicUrl,
+  resolvePasskeyRelyingParty,
   shouldDisableSecureAuthCookies,
 } from "../auth/better-auth.js";
 
@@ -240,5 +242,44 @@ describe("Better Auth cookie scoping", () => {
     ]));
     expect(trustedOrigins).not.toContain("https://board.example.test:3100");
     expect(trustedOrigins).not.toContain("http://board.example.test:3100");
+  });
+});
+
+describe("Passkey relying party", () => {
+  it("uses the public HTTPS hostname as the relying party ID", () => {
+    expect(resolvePasskeyRelyingParty("https://paperclip.example.com/some/path")).toEqual({
+      rpID: "paperclip.example.com",
+      origin: "https://paperclip.example.com",
+    });
+    expect(resolvePasskeyRelyingParty("https://paperclip.example.com:8443")).toEqual({
+      rpID: "paperclip.example.com",
+      origin: "https://paperclip.example.com:8443",
+    });
+  });
+
+  it("allows plain HTTP only for localhost", () => {
+    expect(resolvePasskeyRelyingParty("http://localhost:3100")).toEqual({
+      rpID: "localhost",
+      origin: "http://localhost:3100",
+    });
+    expect(resolvePasskeyRelyingParty("http://paperclip.example.com")).toBeNull();
+  });
+
+  it("disables passkeys when the browser cannot use the host as a relying party ID", () => {
+    expect(resolvePasskeyRelyingParty(undefined)).toBeNull();
+    expect(resolvePasskeyRelyingParty("not a url")).toBeNull();
+    expect(resolvePasskeyRelyingParty("http://127.0.0.1:3100")).toBeNull();
+    expect(resolvePasskeyRelyingParty("https://10.0.0.5")).toBeNull();
+    expect(resolvePasskeyRelyingParty("https://[::1]:3100")).toBeNull();
+  });
+
+  it("prefers PAPERCLIP_PUBLIC_URL over an explicit auth base URL", () => {
+    const config = { authBaseUrlMode: "explicit" as const, authPublicBaseUrl: "https://auth.example.com" };
+    expect(resolveAuthPublicUrl(config, {})).toBe("https://auth.example.com");
+    expect(resolveAuthPublicUrl(config, { PAPERCLIP_PUBLIC_URL: " https://public.example.com " })).toBe(
+      "https://public.example.com",
+    );
+    expect(resolveAuthPublicUrl({ authBaseUrlMode: "auto", authPublicBaseUrl: "https://auth.example.com" }, {}))
+      .toBeUndefined();
   });
 });

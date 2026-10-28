@@ -70,3 +70,18 @@ describe("authApi.signOut", () => {
     });
   });
 });
+
+describe("authApi.regenerateBackupCodes", () => {
+  it("fails instead of returning an empty list once the old codes are replaced", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: true, backupCodes: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ));
+
+    await expect(authApi.regenerateBackupCodes({ password: "supersecret" })).rejects.toThrow(
+      "The server did not return any backup codes",
+    );
+  });
+});

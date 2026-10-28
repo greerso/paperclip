@@ -59,6 +59,28 @@ pnpm paperclipai onboard
 # Choose "authenticated" -> "public"
 ```
 
+### Two-factor authentication and passkeys
+
+In `authenticated` mode, each user can add a second sign-in step and passkeys
+under **Settings → Profile → Sign-in security**.
+
+- **Authenticator app (TOTP)**: always available. The user confirms the
+  password, scans a QR code, and enters one code to turn it on. Paperclip
+  shows 10 one-time backup codes at setup. After that, password sign-in asks
+  for a code from the app or a backup code. The user can trust a device for
+  30 days.
+- **Passkeys**: available only when the instance has a stable public URL that
+  a browser accepts as a WebAuthn relying party. Set `PAPERCLIP_PUBLIC_URL`
+  (or an explicit authentication public URL) to an `https://` URL with a
+  hostname, or to `http://localhost` for local development. IP-address URLs
+  and plain `http://` hostnames do not support passkeys. Passkeys work only on
+  pages served from that exact origin: on any other allowed hostname (a LAN
+  name, loopback) Paperclip hides passkey sign-in and links to the public URL.
+  Changing the public hostname invalidates passkeys registered for the old
+  hostname.
+
+Both options are per user and off by default.
+
 ## Board Claim Flow
 
 When migrating from `local_trusted` to `authenticated`, Paperclip emits a one-time claim URL at startup:
