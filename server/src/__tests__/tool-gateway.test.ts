@@ -3113,6 +3113,68 @@ rl.on("line", (line) => {
     }
   });
 
+  it("omits a null structuredContent from a remote tools/call result", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const fake = await startFakeRemoteMcpServer((fakeRequest) => ({
+      body: {
+        jsonrpc: "2.0",
+        id: fakeRequest.body?.id,
+        result: { content: [{ type: "text", text: "no structure" }], structuredContent: null },
+      },
+    }));
+    try {
+      await createRemoteMcpTool(db, company.id, {
+        applicationKey: "kv-demo",
+        connectionName: "KV Demo null structure",
+        toolName: "kv_set",
+        title: "Set KV value",
+        url: fake.url,
+        credentialRefs: [],
+        credentialSecretRefs: [],
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const connectedTool = (await gateway.listToolsForSession(session.token))
+        .find((tool) => tool.providerType === "mcp_remote_http");
+      expect(connectedTool).toBeTruthy();
+
+      const result = await gateway.executeTool({
+        sessionToken: session.token,
+        tool: connectedTool!.name,
+        parameters: { key: "alpha", value: "one" },
+      });
+      expect(result).toMatchObject({ status: "completed", result: { content: "no structure", data: { transport: "mcp_http" } } });
+      expect((result.result as { data: Record<string, unknown> }).data).not.toHaveProperty("structuredContent");
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("never sends a null structuredContent from the MCP gateway's tools/call", async () => {
+    const gateway = createTestToolGatewayService(db);
+    const results: unknown[] = [
+      { content: "no data" },
+      { content: "rest", data: { structuredContent: null, transport: "rest_api" } },
+    ];
+    const executeTool = vi.fn(async () => ({ status: "completed", result: results.shift() }));
+    const app = createGatewayRouteApp(db, { ...gateway, executeTool } as typeof gateway);
+    const call = (id: number) => request(app)
+      .post(`/api/tool-gateway/gateways/${randomUUID()}/mcp`)
+      .set("authorization", "Bearer gateway-token")
+      .send({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "any_tool", arguments: {} } })
+      .expect(200);
+
+    const noData = await call(1);
+    expect(noData.body.result).toEqual({ content: [{ type: "text", text: "no data" }], isError: false });
+
+    const rest = await call(2);
+    expect(rest.body.result.structuredContent).toEqual({ transport: "rest_api" });
+    expect(executeTool).toHaveBeenCalledTimes(2);
+  });
+
   it("discovers and calls the SDK-backed KV demo MCP server over Streamable HTTP", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
