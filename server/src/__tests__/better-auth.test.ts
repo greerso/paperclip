@@ -10,6 +10,7 @@ import {
   deriveAuthTrustedOrigins,
   resolveAuthPublicUrl,
   resolvePasskeyRelyingParty,
+  resolveTrustedPasskeyRelyingParty,
   shouldDisableSecureAuthCookies,
 } from "../auth/better-auth.js";
 import type { Config } from "../config.js";
@@ -280,6 +281,32 @@ describe("Passkey relying party", () => {
     expect(resolvePasskeyRelyingParty("https://paperclip.example.com:8443")).toEqual({
       rpID: "paperclip.example.com",
       origin: "https://paperclip.example.com:8443",
+    });
+  });
+
+  it("keeps passkeys for auto-mode instances whose public URL is a trusted origin", () => {
+    process.env.BETTER_AUTH_SECRET = "better-auth-secret-for-passkey-rp-tests";
+    process.env.PAPERCLIP_PUBLIC_URL = "https://public.example.test";
+    const config = {
+      deploymentMode: "authenticated",
+      deploymentExposure: "public",
+      authBaseUrlMode: "auto",
+      authPublicBaseUrl: "https://public.example.test",
+      authDisableSignUp: false,
+      allowedHostnames: ["public.example.test"],
+      port: 443,
+    } as unknown as Config;
+
+    const { passkeyRelyingParty } = createBetterAuthInstance({} as Db, config, deriveAuthTrustedOrigins(config));
+
+    expect(passkeyRelyingParty).toEqual({ rpID: "public.example.test", origin: "https://public.example.test" });
+  });
+
+  it("turns passkeys off when their origin is not trusted", () => {
+    expect(resolveTrustedPasskeyRelyingParty("https://public.example.test", ["https://auth.example.test"])).toBeNull();
+    expect(resolveTrustedPasskeyRelyingParty("https://auth.example.test", ["https://auth.example.test"])).toEqual({
+      rpID: "auth.example.test",
+      origin: "https://auth.example.test",
     });
   });
 

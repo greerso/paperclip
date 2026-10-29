@@ -4,7 +4,7 @@ import { AGENT_ADAPTER_TYPES } from "@paperclipai/shared";
 import type { AgentAdapterType, JoinRequest } from "@paperclipai/shared";
 import { Button } from "@/components/ui/button";
 import { CompanyPatternIcon } from "@/components/CompanyPatternIcon";
-import { TwoFactorChallenge } from "@/components/auth/TwoFactorChallenge";
+import { TwoFactorChallenge, signInCompletionErrorMessage } from "@/components/auth/TwoFactorChallenge";
 import { useCompany } from "@/context/CompanyContext";
 import { Link, useNavigate, useParams } from "@/lib/router";
 import { accessApi } from "../api/access";
@@ -414,6 +414,20 @@ export function InviteLandingPage() {
     }
   }
 
+  // The server already accepted the credentials, so this is not a credential failure.
+  // Once the session lands the page shows its signed-in panel, which renders `error`
+  // and whose accept button retries; without a session it is still on the sign-in form.
+  function reportInviteSignInCompletionFailure(err: unknown) {
+    if (queryClient.getQueryData(queryKeys.auth.session)) {
+      setError(signInCompletionErrorMessage(err));
+      return;
+    }
+    setAuthFeedback({
+      tone: "error",
+      message: err instanceof Error && err.message.trim() ? err.message : "Sign-in could not be completed.",
+    });
+  }
+
   const authMutation = useMutation({
     mutationFn: async () => {
       if (authMode === "sign_in") {
@@ -433,7 +447,7 @@ export function InviteLandingPage() {
         setTwoFactorPending(true);
         return;
       }
-      await completeInviteSignIn();
+      await completeInviteSignIn().catch(reportInviteSignInCompletionFailure);
     },
     onError: (err) => {
       const nextFeedback = mapInviteAuthFeedback(err, authMode, email);
@@ -692,20 +706,14 @@ export function InviteLandingPage() {
                 {/* Once the session lands this page re-renders into its signed-in panel and
                     unmounts the challenge, so report a failure there; its accept button retries. */}
                 <TwoFactorChallenge
-                  onVerified={() => completeInviteSignIn().catch((err) => {
-                    setError(
-                      `You are signed in, but Paperclip could not finish loading: ${
-                        err instanceof Error ? err.message : "Unknown error"
-                      }`,
-                    );
-                  })}
+                  onVerified={() => completeInviteSignIn().catch(reportInviteSignInCompletionFailure)}
                   onCancel={() => {
                     setAuthFeedback(null);
                     setTwoFactorPending(false);
                   }}
-                  onExpired={() => {
+                  onExpired={(message) => {
                     setTwoFactorPending(false);
-                    setAuthFeedback({ tone: "error", message: "Your sign-in timed out. Enter your password again." });
+                    setAuthFeedback({ tone: "error", message });
                   }}
                 />
               </div>

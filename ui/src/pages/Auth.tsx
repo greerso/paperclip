@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from "@/lib/router";
 import { authApi } from "../api/auth";
 import { healthApi } from "../api/health";
 import { CloudSignIn } from "@/components/CloudSignIn";
-import { TwoFactorChallenge } from "@/components/auth/TwoFactorChallenge";
+import { TwoFactorChallenge, signInCompletionErrorMessage } from "@/components/auth/TwoFactorChallenge";
 import { isPasskeyOriginCurrent, passkeyErrorMessage } from "@/lib/passkeys";
 import { clearCloudSignInAttempt } from "@/lib/cloud-sign-in";
 import { tenantSignInReturnPath } from "@/lib/cloudLinks";
@@ -76,11 +76,7 @@ export function AuthPage() {
   const completion = useMutation({
     mutationFn: completeSignIn,
     onError: (err) => {
-      setError(
-        `You are signed in, but Paperclip could not finish loading: ${
-          err instanceof Error ? err.message : "Unknown error"
-        }. Refresh the page to continue.`,
-      );
+      setError(`${signInCompletionErrorMessage(err)}. Refresh the page to continue.`);
     },
   });
 
@@ -165,9 +161,9 @@ export function AuthPage() {
                     setError(null);
                     setTwoFactorPending(false);
                   }}
-                  onExpired={() => {
+                  onExpired={(message) => {
                     setTwoFactorPending(false);
-                    setError("Your sign-in timed out. Enter your password again.");
+                    setError(message);
                   }}
                 />
             </>

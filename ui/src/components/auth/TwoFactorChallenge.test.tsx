@@ -127,7 +127,22 @@ describe("TwoFactorChallenge", () => {
     await submitCode("123456");
 
     expect(onExpired).toHaveBeenCalledTimes(1);
+    expect(onExpired).toHaveBeenCalledWith("Your sign-in timed out. Enter your password again.");
     expect(onVerified).not.toHaveBeenCalled();
+  });
+
+  it("sends the user back to the password step after too many wrong codes spend the challenge", async () => {
+    mockAuthApi.verifyTotp.mockRejectedValue(
+      Object.assign(new Error("Too many attempts. Please request a new code."), {
+        code: "TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE",
+      }),
+    );
+    const onExpired = vi.fn();
+    await mount(vi.fn(), vi.fn(), onExpired);
+
+    await submitCode("000000");
+
+    expect(onExpired).toHaveBeenCalledWith("Too many incorrect codes. Enter your password again.");
   });
 
   it("keeps the challenge open for a wrong code", async () => {

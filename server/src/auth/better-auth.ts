@@ -264,6 +264,19 @@ export function resolvePasskeyRelyingParty(publicUrl: string | undefined): Passk
 }
 
 /**
+ * The relying party Better Auth will accept a ceremony from. Better Auth rejects
+ * requests from untrusted origins before the passkey plugin runs, so an origin
+ * outside `trustedOrigins` would show passkeys that can never verify.
+ */
+export function resolveTrustedPasskeyRelyingParty(
+  url: string | undefined,
+  trustedOrigins: readonly string[],
+): PasskeyRelyingParty | null {
+  const relyingParty = resolvePasskeyRelyingParty(url);
+  return relyingParty && trustedOrigins.includes(relyingParty.origin) ? relyingParty : null;
+}
+
+/**
  * Identity a managed workspace instance compares an inbound handoff ticket
  * against. Every field comes from persisted configuration or injected runtime
  * identity — never from request headers — so a spoofed `X-Forwarded-Host` or
@@ -310,8 +323,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     publicUrl,
   });
 
-  // Same URL as `baseURL`, whose origin `deriveAuthTrustedOrigins` always trusts.
-  const passkeyRelyingParty = resolvePasskeyRelyingParty(baseUrl);
+  const passkeyRelyingParty = resolveTrustedPasskeyRelyingParty(baseUrl ?? publicUrl, trustedOrigins);
   const workspaceHandoffIdentity = resolveWorkspaceHandoffIdentity(config);
 
   const authConfig = {

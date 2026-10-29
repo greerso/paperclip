@@ -72,11 +72,11 @@ under **Settings → Profile → Sign-in security**.
   Accounts without a password (for example, ones created through workspace
   handoff) cannot turn it on, because every change asks for the password.
 - **Passkeys**: available only when the instance has a stable public URL that
-  a browser accepts as a WebAuthn relying party. Paperclip uses the explicit
-  authentication public URL, the same one it trusts for sign-in
-  (the first set of `PAPERCLIP_AUTH_PUBLIC_BASE_URL`, `BETTER_AUTH_URL`,
-  `BETTER_AUTH_BASE_URL`, `PAPERCLIP_PUBLIC_URL`, or `auth.publicBaseUrl` in
-  the config file). Set it to an `https://` URL with a
+  a browser accepts as a WebAuthn relying party. Paperclip uses the
+  authentication public URL (the first set of `PAPERCLIP_AUTH_PUBLIC_BASE_URL`,
+  `BETTER_AUTH_URL`, `BETTER_AUTH_BASE_URL`, `PAPERCLIP_PUBLIC_URL`, or
+  `auth.publicBaseUrl` in the config file), and only when sign-in trusts its
+  origin. Set it to an `https://` URL with a
   hostname, or to `http://localhost` for local development. IP-address URLs
   and plain `http://` hostnames do not support passkeys. Passkeys work only on
   pages served from that exact origin: on any other allowed hostname (a LAN

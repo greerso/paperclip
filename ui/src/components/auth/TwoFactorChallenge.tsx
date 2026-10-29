@@ -6,6 +6,24 @@ import { Checkbox } from "@/components/ui/checkbox";
 
 type ChallengeMode = "totp" | "backup";
 
+/** Shown when the session exists but loading the signed-in app failed. */
+export function signInCompletionErrorMessage(err: unknown): string {
+  return `You are signed in, but Paperclip could not finish loading: ${
+    err instanceof Error ? err.message : "Unknown error"
+  }`;
+}
+
+/**
+ * Errors after which the server has spent the challenge, so no further code can
+ * succeed and sign-in must restart from the password step.
+ */
+const SPENT_CHALLENGE_MESSAGES: Record<string, string> = {
+  // The challenge cookie lapsed (10 minutes) or was already consumed.
+  INVALID_TWO_FACTOR_COOKIE: "Your sign-in timed out. Enter your password again.",
+  // Better Auth consumes the challenge and expires its cookie after too many wrong codes.
+  TOO_MANY_ATTEMPTS_REQUEST_NEW_CODE: "Too many incorrect codes. Enter your password again.",
+};
+
 export function TwoFactorChallenge({
   onVerified,
   onCancel,
@@ -13,8 +31,8 @@ export function TwoFactorChallenge({
 }: {
   onVerified: () => Promise<void> | void;
   onCancel: () => void;
-  /** The challenge cookie lapsed (10 minutes), so no code can succeed; restart sign-in. */
-  onExpired: () => void;
+  /** The challenge is spent, so no code can succeed; restart sign-in and show `message`. */
+  onExpired: (message: string) => void;
 }) {
   const codeId = useId();
   const trustId = useId();
@@ -49,8 +67,10 @@ export function TwoFactorChallenge({
       completion.mutate();
     },
     onError: (err) => {
-      if ((err as { code?: unknown } | null)?.code === "INVALID_TWO_FACTOR_COOKIE") {
-        onExpired();
+      const code = (err as { code?: unknown } | null)?.code;
+      const spentMessage = typeof code === "string" ? SPENT_CHALLENGE_MESSAGES[code] : undefined;
+      if (spentMessage) {
+        onExpired(spentMessage);
         return;
       }
       setError(err instanceof Error ? err.message : "Verification failed");
@@ -64,8 +84,7 @@ export function TwoFactorChallenge({
     return (
       <div className="mt-6 space-y-4">
         <p role="alert" className="text-xs text-destructive">
-          You are signed in, but Paperclip could not finish loading:{" "}
-          {completion.error instanceof Error ? completion.error.message : "Unknown error"}
+          {signInCompletionErrorMessage(completion.error)}
         </p>
         <Button
           type="button"
