@@ -3,7 +3,11 @@ import { connect as netConnect, createServer as netCreateServer, Socket, type Ad
 import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { guardedRemoteHttpFetch, type RemoteHttpSocketFactory } from "../services/remote-http-fetch.js";
+import {
+  guardedRemoteHttpFetch,
+  parseRemoteHttpHostRoutes,
+  type RemoteHttpSocketFactory,
+} from "../services/remote-http-fetch.js";
 import { readRemoteConnectionFailure } from "../services/remote-connection-failure.js";
 import { isExpectedMcpConnectionFailure, retainMcpConnectionFailure, withMcpConnectionFailure } from "../services/mcp-connection-failure.js";
 import { HttpError } from "../errors.js";
@@ -646,5 +650,136 @@ describe("guarded remote HTTP fetch (PAP-17098 DNS rebinding)", () => {
       },
     })).rejects.toMatchObject({ code: "remote_http_private_endpoint" });
     expect(internal.requests).toHaveLength(0);
+  });
+});
+
+describe("guarded remote HTTP fetch, operator host routes", () => {
+  it("sends a routed host straight to its private origin with the public URL forwarded", async () => {
+    const seen: Array<Record<string, string | undefined>> = [];
+    const internal = await startServer((req, res) => {
+      seen.push({
+        forwardedHost: req.headers["x-forwarded-host"] as string | undefined,
+        forwardedProto: req.headers["x-forwarded-proto"] as string | undefined,
+        userAgent: req.headers["user-agent"],
+        auth: req.headers.authorization,
+      });
+      res.writeHead(302, { location: "https://elsewhere.test/" });
+      res.end();
+    });
+
+    const response = await guardedRemoteHttpFetch("https://App.Example.test/mcp?x=1", {
+      method: "POST",
+      headers: { authorization: "Bearer t" },
+      body: "{}",
+    }, {
+      allowPrivateNetwork: true,
+      routeOperatorHosts: true,
+      error: guardError,
+      hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": `http://127.0.0.1:${internal.port}` })),
+      lookup: async () => {
+        throw new Error("must not resolve a routed host");
+      },
+    });
+
+    expect(response.status).toBe(302);
+    expect(internal.requests.map((r) => r.url)).toEqual(["/mcp?x=1"]);
+    expect(seen).toEqual([{
+      forwardedHost: "app.example.test",
+      forwardedProto: "https",
+      userAgent: "Paperclip/1.0",
+      auth: "Bearer t",
+    }]);
+  });
+
+  it.each([
+    ["the caller forbids private networks", { allowPrivateNetwork: false, routeOperatorHosts: true }],
+    ["the caller leaves allowPrivateNetwork unset", { routeOperatorHosts: true }],
+    ["the caller does not opt in to routing", { allowPrivateNetwork: true }],
+  ])("keeps a routed host on the guarded path when %s", async (_label, flags) => {
+    const internal = await startServer((_req, res) => res.end("routed"));
+    await expect(guardedRemoteHttpFetch("https://app.example.test/mcp", {}, {
+      ...flags,
+      error: guardError,
+      hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": `http://127.0.0.1:${internal.port}` })),
+      lookup: async () => [{ address: "127.0.0.1", family: 4 }],
+      socketFactory: () => {
+        throw new Error("guarded path reached the dialer");
+      },
+    })).rejects.toThrow(flags.allowPrivateNetwork ? "guarded path reached the dialer" : /private/i);
+    expect(internal.requests).toHaveLength(0);
+  });
+
+  it("leaves hosts that are not routed on the guarded path", async () => {
+    await expect(guardedRemoteHttpFetch("https://other.example.test/mcp", {}, {
+      allowPrivateNetwork: false,
+      routeOperatorHosts: true,
+      error: guardError,
+      hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": "http://127.0.0.1:1" })),
+      lookup: async () => [{ address: "127.0.0.1", family: 4 }],
+      socketFactory: () => {
+        throw new Error("must not dial");
+      },
+    })).rejects.toMatchObject({ code: "remote_http_private_endpoint" });
+  });
+
+  it("maps a routed origin that does not resolve to the stable DNS code", async () => {
+    const cause = Object.assign(new Error("getaddrinfo ENOTFOUND app-container"), { code: "ENOTFOUND" });
+    const failure = await guardedRemoteHttpFetch("https://app.example.test/mcp", {}, {
+      allowPrivateNetwork: true,
+      routeOperatorHosts: true,
+      error: guardError,
+      hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": "http://app-container:3000" })),
+      unpinnedFetch: (async () => {
+        throw Object.assign(new TypeError("fetch failed"), { cause });
+      }) as typeof fetch,
+    }).catch((error) => error);
+    expect(failure).toMatchObject({ code: "remote_http_dns_failed" });
+  });
+
+  it("holds a routed host to the response deadline", async () => {
+    const internal = await startServer(() => {
+      // never answers
+    });
+    const failure = await guardedRemoteHttpFetch("https://app.example.test/mcp", {}, {
+      allowPrivateNetwork: true,
+      routeOperatorHosts: true,
+      error: guardError,
+      connectTimeoutMs: 50,
+      responseTimeoutMs: 100,
+      hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": `http://127.0.0.1:${internal.port}` })),
+    }).catch((error) => error);
+    expect(failure).toMatchObject({ code: "remote_http_response_timeout" });
+  });
+
+  it("holds a routed body to the idle deadline", async () => {
+    const internal = await startServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write("{");
+      // never finishes
+    });
+    const response = await guardedRemoteHttpFetch("https://app.example.test/mcp", {}, {
+      allowPrivateNetwork: true,
+      routeOperatorHosts: true,
+      error: guardError,
+      connectTimeoutMs: 50,
+      responseTimeoutMs: 100,
+      hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": `http://127.0.0.1:${internal.port}` })),
+    });
+    const failure = await response.text().catch((error) => error);
+    expect(failure).toMatchObject({ code: "remote_http_response_timeout" });
+  });
+
+  it("parses PAPERCLIP_REMOTE_HTTP_HOST_ROUTES strictly", () => {
+    expect(() => parseRemoteHttpHostRoutes('{"a.test:8443":"http://a:3000"}')).toThrow(/bare hostname/);
+    expect(() => parseRemoteHttpHostRoutes('{"a.test/x":"http://a:3000"}')).toThrow(/bare hostname/);
+    expect(parseRemoteHttpHostRoutes(undefined).size).toBe(0);
+    expect(parseRemoteHttpHostRoutes(" ").size).toBe(0);
+    expect([...parseRemoteHttpHostRoutes('{"A.test":"http://a:3000/"}')]).toEqual([["a.test", "http://a:3000"]]);
+    expect(() => parseRemoteHttpHostRoutes("[]")).toThrow(/JSON object/);
+    expect(() => parseRemoteHttpHostRoutes("{bad")).toThrow();
+    expect(() => parseRemoteHttpHostRoutes('{"a.test":"http://a:3000/path"}')).toThrow(/bare http\(s\) origin/);
+    expect(() => parseRemoteHttpHostRoutes('{"a.test":"ftp://a"}')).toThrow(/bare http\(s\) origin/);
+    expect(() => parseRemoteHttpHostRoutes('{"a.test":"not a url"}')).toThrow(/bare http\(s\) origin/);
+    expect(() => parseRemoteHttpHostRoutes('{"a.test":3000}')).toThrow(/bare http\(s\) origin/);
   });
 });

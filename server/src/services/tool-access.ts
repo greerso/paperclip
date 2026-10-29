@@ -3347,6 +3347,7 @@ export function toolAccessService(
   function remoteHttpFetchOptions(): GuardedRemoteHttpFetchOptions {
     return {
       allowPrivateNetwork: allowPrivateRemoteEndpoints(),
+      routeOperatorHosts: true,
       lookup: options.remoteHttpEndpointLookup,
       error: (message, code) => badRequest(message, { code }),
     };

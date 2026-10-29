@@ -58,10 +58,57 @@ export type GuardedRemoteHttpFetchOptions = RemoteHttpEndpointGuardOptions & {
   /** Deadline for response headers, and idle deadline between body chunks. */
   responseTimeoutMs?: number;
   /**
-   * Platform `fetch`, used only for IP literals, which cannot be rebound.
+   * Platform `fetch`, used only for IP literals, which cannot be rebound, and
+   * for operator-routed hosts.
    */
   unpinnedFetch?: typeof fetch;
+  /**
+   * Test seam for `PAPERCLIP_REMOTE_HTTP_HOST_ROUTES`: lowercase hostname to
+   * the origin that serves it. Production leaves this unset.
+   */
+  hostRoutes?: ReadonlyMap<string, string>;
+  /**
+   * Opt in to operator host routes. Only the tool-gateway and tool-access MCP
+   * callers set this, and routing also needs `allowPrivateNetwork`: a caller
+   * that forbids private networks (public-MCP client metadata, event webhooks)
+   * always takes the guarded path, even for a routed host.
+   */
+  routeOperatorHosts?: boolean;
 };
+
+/**
+ * `PAPERCLIP_REMOTE_HTTP_HOST_ROUTES` is a JSON object mapping a public
+ * hostname to the origin that serves it on a network the operator controls,
+ * e.g. `{"app.example.com":"http://app-container:3000"}`. A request to a routed
+ * host goes straight to that origin, keeping the path and query, with
+ * `X-Forwarded-Host`/`X-Forwarded-Proto` naming the public URL. It skips the
+ * public-address guard: the operator chose the target, so its private address
+ * is the point. Only callers that set `routeOperatorHosts` and allow private
+ * networks are routed. A malformed value throws at startup instead of silently
+ * sending traffic the long way round.
+ */
+export function parseRemoteHttpHostRoutes(raw: string | undefined): ReadonlyMap<string, string> {
+  const routes = new Map<string, string>();
+  if (raw === undefined || raw.trim() === "") return routes;
+  const parsed: unknown = JSON.parse(raw);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new TypeError("PAPERCLIP_REMOTE_HTTP_HOST_ROUTES must be a JSON object of hostname to origin");
+  }
+  for (const [hostname, target] of Object.entries(parsed)) {
+    const keyUrl = URL.canParse(`http://${hostname}`) ? new URL(`http://${hostname}`) : null;
+    if (!keyUrl || keyUrl.host !== hostname.toLowerCase() || keyUrl.port !== "") {
+      throw new TypeError(`PAPERCLIP_REMOTE_HTTP_HOST_ROUTES: ${hostname} must be a bare hostname`);
+    }
+    const origin = typeof target === "string" && URL.canParse(target) ? new URL(target) : null;
+    if (!origin || (origin.protocol !== "http:" && origin.protocol !== "https:") || origin.origin !== target.replace(/\/$/, "")) {
+      throw new TypeError(`PAPERCLIP_REMOTE_HTTP_HOST_ROUTES: ${hostname} must map to a bare http(s) origin`);
+    }
+    routes.set(hostname.toLowerCase(), origin.origin);
+  }
+  return routes;
+}
+
+const envHostRoutes = parseRemoteHttpHostRoutes(process.env.PAPERCLIP_REMOTE_HTTP_HOST_ROUTES);
 
 /**
  * Fetch a remote endpoint without reopening the DNS-rebinding window the guard
@@ -97,25 +144,103 @@ export async function guardedRemoteHttpFetch(
   options: GuardedRemoteHttpFetchOptions,
 ): Promise<Response> {
   const endpoint = url instanceof URL ? url : new URL(url);
+  const platformFetch = options.unpinnedFetch ?? fetch;
+  const routedOrigin = options.routeOperatorHosts && options.allowPrivateNetwork
+    ? (options.hostRoutes ?? envHostRoutes).get(endpoint.hostname.toLowerCase())
+    : undefined;
+  if (routedOrigin) {
+    const headers = new Headers(init.headers);
+    headers.set("x-forwarded-host", endpoint.host);
+    headers.set("x-forwarded-proto", endpoint.protocol.slice(0, -1));
+    if (!headers.has("user-agent")) headers.set("user-agent", "Paperclip/1.0");
+    return fetchRouted(platformFetch, `${routedOrigin}${endpoint.pathname}${endpoint.search}`, { ...init, headers }, options);
+  }
   const approved = await resolveApprovedRemoteHttpAddresses(endpoint, options, options.error);
   const literalHost = isIP(endpoint.hostname.replace(/^\[|\]$/g, "")) !== 0;
-  const platformFetch = options.unpinnedFetch ?? fetch;
-  if (literalHost) {
-    try {
-      return await platformFetch(endpoint.toString(), { ...init, redirect: "manual" });
-    } catch (error) {
-      if (isDnsResolutionError(error)) {
-        const failure = options.error(
-          "Remote MCP connection hostname could not be resolved",
-          "remote_http_dns_failed",
-        );
-        if (classifyRemoteConnectionError(error) === "dns_failure") markRemoteConnectionFailure(failure, "dns_failure");
-        throw failure;
-      }
-      throw error;
-    }
-  }
+  if (literalHost) return fetchUnpinned(platformFetch, endpoint.toString(), init, options);
   return pinnedRequest(endpoint, approved, init, options);
+}
+
+/**
+ * Routed hosts use the platform `fetch`, whose undici defaults allow 300 s for
+ * headers. Hold them to the same connect + response deadline the pinned path
+ * enforces, so a hung app container cannot stall callers that pass no signal.
+ */
+async function fetchRouted(
+  platformFetch: typeof fetch,
+  target: string,
+  init: RequestInit,
+  options: GuardedRemoteHttpFetchOptions,
+): Promise<Response> {
+  const deadlineMs = (options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS)
+    + (options.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeoutError = markRemoteConnectionFailure(
+    options.error("Remote MCP endpoint did not respond in time", "remote_http_response_timeout"),
+    "connection_timeout",
+  );
+  const timer = setTimeout(() => controller.abort(timeoutError), deadlineMs);
+  timer.unref?.();
+  const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+  let response: Response;
+  try {
+    response = await fetchUnpinned(platformFetch, target, { ...init, signal }, options);
+  } catch (error) {
+    if (controller.signal.aborted && !init.signal?.aborted) throw timeoutError;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response.body || NULL_BODY_STATUSES.has(response.status)) return response;
+
+  // Body idle deadline, matching the pinned path: a read that waits longer than
+  // `responseTimeoutMs` for the next chunk aborts the request.
+  const idleMs = options.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS;
+  const stalledError = markRemoteConnectionFailure(
+    options.error("Remote MCP endpoint stalled mid-response", "remote_http_response_timeout"),
+    "connection_timeout",
+  );
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(output) {
+      const idle = setTimeout(() => controller.abort(stalledError), idleMs);
+      idle.unref?.();
+      try {
+        const { done, value } = await reader.read();
+        if (done) output.close();
+        else output.enqueue(value);
+      } catch (error) {
+        output.error(controller.signal.aborted && !init.signal?.aborted ? stalledError : error);
+      } finally {
+        clearTimeout(idle);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
+async function fetchUnpinned(
+  platformFetch: typeof fetch,
+  target: string,
+  init: RequestInit,
+  options: GuardedRemoteHttpFetchOptions,
+): Promise<Response> {
+  try {
+    return await platformFetch(target, { ...init, redirect: "manual" });
+  } catch (error) {
+    if (isDnsResolutionError(error)) {
+      const failure = options.error(
+        "Remote MCP connection hostname could not be resolved",
+        "remote_http_dns_failed",
+      );
+      if (classifyRemoteConnectionError(error) === "dns_failure") markRemoteConnectionFailure(failure, "dns_failure");
+      throw failure;
+    }
+    throw error;
+  }
 }
 
 /** Node's platform fetch wraps DNS failures in TypeError.cause. */
