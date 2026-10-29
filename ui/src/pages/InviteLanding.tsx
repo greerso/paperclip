@@ -685,7 +685,7 @@ export function InviteLandingPage() {
               <div className="space-y-5">
                 <div>
                   <h2 className="text-lg font-semibold">Two-factor authentication</h2>
-                  <p className="mt-1 text-sm text-zinc-400">
+                  <p className="mt-1 text-sm text-muted-foreground">
                     Enter the code from your authenticator app, or use one of your backup codes.
                   </p>
                 </div>
