@@ -4413,6 +4413,89 @@ rl.on("line", (line) => {
     });
   }
 
+  // Answers the tools/call with streamed SSE headers, then never sends the
+  // message. On abort the body fails the way node:http's does mid-stream.
+  function streamThatStallsUntilAborted(): NonNullable<ToolGatewayServiceOptions["remoteHttpRequest"]> {
+    return async (_url, init) => {
+      const message = JSON.parse(String(init.body)) as { id: string; method: string };
+      if (message.method !== "tools/call") {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }),
+          { headers: { "content-type": "application/json" } });
+      }
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) {
+          stream.enqueue(new TextEncoder().encode(": ping\n\n"));
+          init.signal?.addEventListener("abort", () => {
+            stream.error(Object.assign(new Error("aborted"), { code: "ECONNRESET" }));
+          }, { once: true });
+        },
+      });
+      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+    };
+  }
+
+  async function connectedRemoteTool(connectionConfig?: Record<string, unknown>) {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    await createRemoteMcpTool(db, company.id, { toolName: "kv_set", connectionConfig });
+    await allowAllToolsForAgent(db, company.id, agent.id);
+    return { company, agent, run };
+  }
+
+  it("reports a timeout that lands mid-stream as tool_timeout, not a fetch failure", async () => {
+    const { company, agent, run } = await connectedRemoteTool();
+    const gateway = createTestToolGatewayService(db, { remoteHttpRequest: streamThatStallsUntilAborted() });
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const tool = (await gateway.listToolsForSession(session.token))
+      .find((candidate) => candidate.providerType === "mcp_remote_http")!;
+
+    await gateway.executeTool({
+      sessionToken: session.token,
+      tool: tool.name,
+      parameters: { key: "alpha", value: "one" },
+      timeoutMs: 20,
+    }).then(
+      () => {
+        throw new Error("Expected the stalled remote MCP call to time out");
+      },
+      (error) => expectGatewayError(error, 504, "tool_timeout"),
+    );
+  });
+
+  it("gives Composio calls the 60 s budget when the caller sets none", async () => {
+    const { company, agent, run } = await connectedRemoteTool({ sourceTemplateKey: "composio" });
+    const aborted: boolean[] = [];
+    const gateway = createTestToolGatewayService(db, { remoteHttpRequest: async (_url, init) => {
+      const message = JSON.parse(String(init.body)) as { id: string; method: string };
+      if (message.method === "tools/call") {
+        // Wait past the 10 s default; resolve before the 60 s budget aborts.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 10_500);
+          init.signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve();
+          }, { once: true });
+        });
+        aborted.push(init.signal?.aborted ?? false);
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+        result: message.method === "tools/call" ? { content: [{ type: "text", text: "ok" }] } : {} }),
+      { headers: { "content-type": "application/json" } });
+    } });
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const tool = (await gateway.listToolsForSession(session.token))
+      .find((candidate) => candidate.providerType === "mcp_remote_http")!;
+
+    const result = await gateway.executeTool({
+      sessionToken: session.token,
+      tool: tool.name,
+      parameters: { key: "alpha", value: "one" },
+    });
+    expect(aborted).toEqual([false]);
+    expect(result.status).toBe("completed");
+  }, 20_000);
+
   function initializeFakeMcpSession(request: FakeMcpRequest, sessionId: string) {
     return {
       headers: { "mcp-session-id": sessionId },

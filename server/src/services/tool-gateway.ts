@@ -5954,6 +5954,12 @@ export function createToolGatewayService(
     if (useDefaultTimeout && isRailwayConnection(connection) && entry.toolName === `${RAILWAY_TOOL_PREFIX}run-command`) {
       ms = railwayCommandBudgetMs(parameters);
     }
+    // Composio's MCP tools run other providers' APIs inside Composio's sandbox,
+    // so one call routinely outlasts the 10 s default. MCP clients cannot pass
+    // a budget, so give these calls the 60 s cap unless the caller set one.
+    if (useDefaultTimeout && connection.config.sourceTemplateKey === "composio") {
+      ms = 60_000;
+    }
     const grant = await resolveConnectionGrant(session, connection);
     if (isBrowserUseConnection(connection)) {
       const data = await browserUseService(db, options.remoteHttpRequest).execute(session, grant, invocationId!, entry.toolName, parameters);
@@ -6376,7 +6382,10 @@ export function createToolGatewayService(
       }
       // Timeouts and network failures below describe this dispatch, not the
       // connection, so they leave its health alone (see the !response.ok case).
-      if (error instanceof Error && error.name === "AbortError") {
+      // Check the controller as well as the error name: an abort that lands
+      // while an SSE body is streaming surfaces as node:http's
+      // `Error: aborted` (ECONNRESET), not as an AbortError.
+      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
         throw new ToolGatewayHttpError(
           504,
           "Remote MCP tool call timed out",
