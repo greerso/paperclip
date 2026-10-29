@@ -672,7 +672,8 @@ describe("guarded remote HTTP fetch, operator host routes", () => {
       headers: { authorization: "Bearer t" },
       body: "{}",
     }, {
-      allowPrivateNetwork: false,
+      allowPrivateNetwork: true,
+      routeOperatorHosts: true,
       error: guardError,
       hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": `http://127.0.0.1:${internal.port}` })),
       lookup: async () => {
@@ -690,9 +691,28 @@ describe("guarded remote HTTP fetch, operator host routes", () => {
     }]);
   });
 
+  it.each([
+    ["the caller forbids private networks", { allowPrivateNetwork: false, routeOperatorHosts: true }],
+    ["the caller leaves allowPrivateNetwork unset", { routeOperatorHosts: true }],
+    ["the caller does not opt in to routing", { allowPrivateNetwork: true }],
+  ])("keeps a routed host on the guarded path when %s", async (_label, flags) => {
+    const internal = await startServer((_req, res) => res.end("routed"));
+    await expect(guardedRemoteHttpFetch("https://app.example.test/mcp", {}, {
+      ...flags,
+      error: guardError,
+      hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": `http://127.0.0.1:${internal.port}` })),
+      lookup: async () => [{ address: "127.0.0.1", family: 4 }],
+      socketFactory: () => {
+        throw new Error("guarded path reached the dialer");
+      },
+    })).rejects.toThrow(flags.allowPrivateNetwork ? "guarded path reached the dialer" : /private/i);
+    expect(internal.requests).toHaveLength(0);
+  });
+
   it("leaves hosts that are not routed on the guarded path", async () => {
     await expect(guardedRemoteHttpFetch("https://other.example.test/mcp", {}, {
       allowPrivateNetwork: false,
+      routeOperatorHosts: true,
       error: guardError,
       hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": "http://127.0.0.1:1" })),
       lookup: async () => [{ address: "127.0.0.1", family: 4 }],
@@ -705,6 +725,8 @@ describe("guarded remote HTTP fetch, operator host routes", () => {
   it("maps a routed origin that does not resolve to the stable DNS code", async () => {
     const cause = Object.assign(new Error("getaddrinfo ENOTFOUND app-container"), { code: "ENOTFOUND" });
     const failure = await guardedRemoteHttpFetch("https://app.example.test/mcp", {}, {
+      allowPrivateNetwork: true,
+      routeOperatorHosts: true,
       error: guardError,
       hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": "http://app-container:3000" })),
       unpinnedFetch: (async () => {
@@ -719,6 +741,8 @@ describe("guarded remote HTTP fetch, operator host routes", () => {
       // never answers
     });
     const failure = await guardedRemoteHttpFetch("https://app.example.test/mcp", {}, {
+      allowPrivateNetwork: true,
+      routeOperatorHosts: true,
       error: guardError,
       connectTimeoutMs: 50,
       responseTimeoutMs: 100,

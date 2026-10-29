@@ -3383,6 +3383,7 @@ export function createToolGatewayService(
   function remoteHttpFetchOptions(): GuardedRemoteHttpFetchOptions {
     return {
       allowPrivateNetwork: allowPrivateRemoteEndpoints(),
+      routeOperatorHosts: true,
       error: (message, code) => new ToolGatewayHttpError(422, message, code),
     };
   }

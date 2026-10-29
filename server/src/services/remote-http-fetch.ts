@@ -67,6 +67,13 @@ export type GuardedRemoteHttpFetchOptions = RemoteHttpEndpointGuardOptions & {
    * the origin that serves it. Production leaves this unset.
    */
   hostRoutes?: ReadonlyMap<string, string>;
+  /**
+   * Opt in to operator host routes. Only the tool-gateway and tool-access MCP
+   * callers set this, and routing also needs `allowPrivateNetwork`: a caller
+   * that forbids private networks (public-MCP client metadata, event webhooks)
+   * always takes the guarded path, even for a routed host.
+   */
+  routeOperatorHosts?: boolean;
 };
 
 /**
@@ -76,7 +83,8 @@ export type GuardedRemoteHttpFetchOptions = RemoteHttpEndpointGuardOptions & {
  * host goes straight to that origin, keeping the path and query, with
  * `X-Forwarded-Host`/`X-Forwarded-Proto` naming the public URL. It skips the
  * public-address guard: the operator chose the target, so its private address
- * is the point. A malformed value throws at startup instead of silently
+ * is the point. Only callers that set `routeOperatorHosts` and allow private
+ * networks are routed. A malformed value throws at startup instead of silently
  * sending traffic the long way round.
  */
 export function parseRemoteHttpHostRoutes(raw: string | undefined): ReadonlyMap<string, string> {
@@ -133,7 +141,9 @@ export async function guardedRemoteHttpFetch(
 ): Promise<Response> {
   const endpoint = url instanceof URL ? url : new URL(url);
   const platformFetch = options.unpinnedFetch ?? fetch;
-  const routedOrigin = (options.hostRoutes ?? envHostRoutes).get(endpoint.hostname.toLowerCase());
+  const routedOrigin = options.routeOperatorHosts && options.allowPrivateNetwork
+    ? (options.hostRoutes ?? envHostRoutes).get(endpoint.hostname.toLowerCase())
+    : undefined;
   if (routedOrigin) {
     const headers = new Headers(init.headers);
     headers.set("x-forwarded-host", endpoint.host);
