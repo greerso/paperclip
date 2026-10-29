@@ -714,6 +714,19 @@ describe("guarded remote HTTP fetch, operator host routes", () => {
     expect(failure).toMatchObject({ code: "remote_http_dns_failed" });
   });
 
+  it("holds a routed host to the response deadline", async () => {
+    const internal = await startServer(() => {
+      // never answers
+    });
+    const failure = await guardedRemoteHttpFetch("https://app.example.test/mcp", {}, {
+      error: guardError,
+      connectTimeoutMs: 50,
+      responseTimeoutMs: 100,
+      hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": `http://127.0.0.1:${internal.port}` })),
+    }).catch((error) => error);
+    expect(failure).toMatchObject({ code: "remote_http_response_timeout" });
+  });
+
   it("parses PAPERCLIP_REMOTE_HTTP_HOST_ROUTES strictly", () => {
     expect(parseRemoteHttpHostRoutes(undefined).size).toBe(0);
     expect(parseRemoteHttpHostRoutes(" ").size).toBe(0);

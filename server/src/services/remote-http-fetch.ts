@@ -139,12 +139,43 @@ export async function guardedRemoteHttpFetch(
     headers.set("x-forwarded-host", endpoint.host);
     headers.set("x-forwarded-proto", endpoint.protocol.slice(0, -1));
     if (!headers.has("user-agent")) headers.set("user-agent", "Paperclip/1.0");
-    return fetchUnpinned(platformFetch, `${routedOrigin}${endpoint.pathname}${endpoint.search}`, { ...init, headers }, options);
+    return fetchRouted(platformFetch, `${routedOrigin}${endpoint.pathname}${endpoint.search}`, { ...init, headers }, options);
   }
   const approved = await resolveApprovedRemoteHttpAddresses(endpoint, options, options.error);
   const literalHost = isIP(endpoint.hostname.replace(/^\[|\]$/g, "")) !== 0;
   if (literalHost) return fetchUnpinned(platformFetch, endpoint.toString(), init, options);
   return pinnedRequest(endpoint, approved, init, options);
+}
+
+/**
+ * Routed hosts use the platform `fetch`, whose undici defaults allow 300 s for
+ * headers. Hold them to the same connect + response deadline the pinned path
+ * enforces, so a hung app container cannot stall callers that pass no signal.
+ */
+async function fetchRouted(
+  platformFetch: typeof fetch,
+  target: string,
+  init: RequestInit,
+  options: GuardedRemoteHttpFetchOptions,
+): Promise<Response> {
+  const deadlineMs = (options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS)
+    + (options.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeoutError = markRemoteConnectionFailure(
+    options.error("Remote MCP endpoint did not respond in time", "remote_http_response_timeout"),
+    "connection_timeout",
+  );
+  const timer = setTimeout(() => controller.abort(timeoutError), deadlineMs);
+  timer.unref?.();
+  const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+  try {
+    return await fetchUnpinned(platformFetch, target, { ...init, signal }, options);
+  } catch (error) {
+    if (controller.signal.aborted && !init.signal?.aborted) throw timeoutError;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function fetchUnpinned(
