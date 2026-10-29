@@ -36,6 +36,16 @@ const TOOL_GATEWAY_WINDOWS: Record<string, number | null> = {
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// MCP makes a tools/call result's structuredContent an optional object, and
+// clients reject null, so omit it unless the tool returned an object. A
+// nested `structuredContent: null` (a REST result's empty body) is dropped too.
+function mcpStructuredContent(data: unknown): Record<string, unknown> | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  return Object.fromEntries(
+    Object.entries(data).filter(([key, value]) => !(key === "structuredContent" && value === null)),
+  );
+}
+
 function gatewayToken(req: { header(name: string): string | undefined }) {
   return req.header("x-paperclip-tool-gateway-token")?.trim() || null;
 }
@@ -194,12 +204,13 @@ async function handleMcpGatewayProtocol(
       const contentText = typeof resultRecord?.content === "string"
         ? resultRecord.content
         : JSON.stringify(resultRecord?.data ?? result.result ?? null);
+      const structuredContent = mcpStructuredContent(resultRecord?.data);
       res.json({
         jsonrpc: "2.0",
         id,
         result: {
           content: [{ type: "text", text: contentText }],
-          structuredContent: resultRecord?.data ?? null,
+          ...(structuredContent ? { structuredContent } : {}),
           isError: false,
         },
       });

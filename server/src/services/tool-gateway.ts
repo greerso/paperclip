@@ -5924,7 +5924,8 @@ export function createToolGatewayService(
       content,
       data: {
         content: record.content,
-        structuredContent: record.structuredContent ?? null,
+        // MCP makes structuredContent an optional object; clients reject null.
+        ...(asRecord(record.structuredContent) ? { structuredContent: record.structuredContent } : {}),
         isError: record.isError === true,
         transport,
         spawnedLocalProcess,
