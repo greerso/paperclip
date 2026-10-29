@@ -689,11 +689,23 @@ export function InviteLandingPage() {
                     Enter the code from your authenticator app, or use one of your backup codes.
                   </p>
                 </div>
+                {/* Once the session lands this page re-renders into its signed-in panel and
+                    unmounts the challenge, so report a failure there; its accept button retries. */}
                 <TwoFactorChallenge
-                  onVerified={completeInviteSignIn}
+                  onVerified={() => completeInviteSignIn().catch((err) => {
+                    setError(
+                      `You are signed in, but Paperclip could not finish loading: ${
+                        err instanceof Error ? err.message : "Unknown error"
+                      }`,
+                    );
+                  })}
                   onCancel={() => {
                     setAuthFeedback(null);
                     setTwoFactorPending(false);
+                  }}
+                  onExpired={() => {
+                    setTwoFactorPending(false);
+                    setAuthFeedback({ tone: "error", message: "Your sign-in timed out. Enter your password again." });
                   }}
                 />
               </div>

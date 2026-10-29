@@ -5,13 +5,17 @@ import { errorHandler } from "../middleware/index.js";
 import { authRoutes } from "../routes/auth.js";
 
 function createSelectChain(rows: unknown[]) {
+  const query = {
+    leftJoin() {
+      return query;
+    },
+    where() {
+      return Promise.resolve(rows);
+    },
+  };
   return {
     from() {
-      return {
-        where() {
-          return Promise.resolve(rows);
-        },
-      };
+      return query;
     },
   };
 }
@@ -327,16 +331,28 @@ describe("auth routes", () => {
     expect(on.body).toEqual({ passkeyOrigin: "https://paperclip.example.com" });
   });
 
-  it("returns the signed-in user's two-factor state", async () => {
+  it("returns the signed-in user's two-factor and password state", async () => {
     const app = createApp(
       { type: "board", userId: "user-1", source: "session" },
-      { twoFactorEnabled: true },
+      { twoFactorEnabled: true, credentialAccountId: "account-1" },
     );
 
     const res = await request(app).get("/api/auth/account-security");
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ twoFactorEnabled: true });
+    expect(res.body).toEqual({ twoFactorEnabled: true, hasPassword: true });
+  });
+
+  it("reports no password for an account without a credential login", async () => {
+    const app = createApp(
+      { type: "board", userId: "user-1", source: "session" },
+      { twoFactorEnabled: false, credentialAccountId: null },
+    );
+
+    const res = await request(app).get("/api/auth/account-security");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ twoFactorEnabled: false, hasPassword: false });
   });
 
   it("rejects account security reads without a board session", async () => {

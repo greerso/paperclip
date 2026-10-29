@@ -408,6 +408,34 @@ describe("AuthPage", () => {
     });
   });
 
+  it("returns to the password step when the two-factor challenge has expired", async () => {
+    signInEmailMock.mockResolvedValue({ twoFactorRequired: true });
+    verifyTotpMock.mockRejectedValue(
+      Object.assign(new Error("Invalid two factor cookie"), { code: "INVALID_TWO_FACTOR_COOKIE" }),
+    );
+    const { root } = await mount();
+
+    await act(async () => {
+      setInputValue(container.querySelector('input[name="email"]') as HTMLInputElement, "jane@example.com");
+      setInputValue(container.querySelector('input[name="password"]') as HTMLInputElement, "supersecret");
+    });
+    await submitForm();
+    await act(async () => {
+      setInputValue(container.querySelector('input[name="code"]') as HTMLInputElement, "123456");
+    });
+    await submitForm();
+
+    expect(container.querySelector('input[name="code"]')).toBeNull();
+    expect(container.querySelector('input[name="password"]')).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      "Your sign-in timed out. Enter your password again.",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("shows a passkey sign-in button only when the instance supports passkeys", async () => {
     const first = await mount();
     const findPasskeyButton = () => Array.from(container.querySelectorAll("button")).find(

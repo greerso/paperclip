@@ -1,24 +1,30 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { BetterAuthOptions } from "better-auth";
 import { getCookies } from "better-auth/cookies";
+import type { Db } from "@paperclipai/db";
 import {
   buildBetterAuthAdvancedOptions,
   buildBetterAuthRateLimitOptions,
+  createBetterAuthInstance,
   deriveAuthCookiePrefix,
   deriveAuthTrustedOrigins,
   resolveAuthPublicUrl,
   resolvePasskeyRelyingParty,
   shouldDisableSecureAuthCookies,
 } from "../auth/better-auth.js";
+import type { Config } from "../config.js";
 
 const ORIGINAL_INSTANCE_ID = process.env.PAPERCLIP_INSTANCE_ID;
 const ORIGINAL_PUBLIC_URL = process.env.PAPERCLIP_PUBLIC_URL;
+const ORIGINAL_AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
 
 afterEach(() => {
   if (ORIGINAL_INSTANCE_ID === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
   else process.env.PAPERCLIP_INSTANCE_ID = ORIGINAL_INSTANCE_ID;
   if (ORIGINAL_PUBLIC_URL === undefined) delete process.env.PAPERCLIP_PUBLIC_URL;
   else process.env.PAPERCLIP_PUBLIC_URL = ORIGINAL_PUBLIC_URL;
+  if (ORIGINAL_AUTH_SECRET === undefined) delete process.env.BETTER_AUTH_SECRET;
+  else process.env.BETTER_AUTH_SECRET = ORIGINAL_AUTH_SECRET;
 });
 
 describe("Better Auth cookie scoping", () => {
@@ -246,6 +252,26 @@ describe("Better Auth cookie scoping", () => {
 });
 
 describe("Passkey relying party", () => {
+  it("serves passkeys from the trusted auth base URL, not PAPERCLIP_PUBLIC_URL", () => {
+    process.env.BETTER_AUTH_SECRET = "better-auth-secret-for-passkey-rp-tests";
+    process.env.PAPERCLIP_PUBLIC_URL = "https://public.example.test";
+    const config = {
+      deploymentMode: "authenticated",
+      deploymentExposure: "public",
+      authBaseUrlMode: "explicit",
+      authPublicBaseUrl: "https://auth.example.test",
+      authDisableSignUp: false,
+      allowedHostnames: [],
+      port: 3100,
+    } as unknown as Config;
+    const trustedOrigins = deriveAuthTrustedOrigins(config);
+
+    const { passkeyRelyingParty } = createBetterAuthInstance({} as Db, config, trustedOrigins);
+
+    expect(passkeyRelyingParty).toEqual({ rpID: "auth.example.test", origin: "https://auth.example.test" });
+    expect(trustedOrigins).toContain(passkeyRelyingParty?.origin);
+  });
+
   it("uses the public HTTPS hostname as the relying party ID", () => {
     expect(resolvePasskeyRelyingParty("https://paperclip.example.com/some/path")).toEqual({
       rpID: "paperclip.example.com",

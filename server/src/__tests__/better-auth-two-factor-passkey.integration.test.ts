@@ -188,7 +188,10 @@ describeEmbeddedPostgres("Better Auth two-factor and passkey plugins against the
     const registerOptions = await owner.get("/api/auth/passkey/generate-register-options").set("origin", ORIGIN);
     expect(registerOptions.status).toBe(200);
     expect(registerOptions.body?.rp).toMatchObject({ id: "localhost", name: "Paperclip" });
-    expect(registerOptions.body?.authenticatorSelection?.userVerification).toBe("required");
+    expect(registerOptions.body?.authenticatorSelection).toMatchObject({
+      residentKey: "required",
+      userVerification: "required",
+    });
 
     const authenticator = new SoftwarePasskey("localhost", ORIGIN);
     const registered = await owner
@@ -241,9 +244,8 @@ describeEmbeddedPostgres("Better Auth two-factor and passkey plugins against the
       .post("/api/auth/passkey/verify-registration")
       .set("origin", ORIGIN)
       .send({ response: authenticator.register(unverifiedOptions.body, { userVerified: false }), name: "Key" });
-    // The plugin passes our 401 through only when it shares our @better-auth/core
-    // copy; otherwise it wraps it in a generic error. Either way it must reject.
-    expect(unverifiedRegistration.status).toBeGreaterThanOrEqual(400);
+    expect(unverifiedRegistration.status).toBe(401);
+    expect(unverifiedRegistration.body?.code).toBe("PASSKEY_USER_VERIFICATION_REQUIRED");
     expect(await db.select().from(authPasskeys).where(eq(authPasskeys.credentialID, authenticator.id))).toHaveLength(0);
 
     const registerOptions = await owner.get("/api/auth/passkey/generate-register-options").set("origin", ORIGIN);
@@ -261,7 +263,8 @@ describeEmbeddedPostgres("Better Auth two-factor and passkey plugins against the
       .post("/api/auth/passkey/verify-authentication")
       .set("origin", ORIGIN)
       .send({ response: authenticator.authenticate(authenticateOptions.body, { userVerified: false }) });
-    expect(signIn.status).toBeGreaterThanOrEqual(400);
+    expect(signIn.status).toBe(401);
+    expect(signIn.body?.code).toBe("PASSKEY_USER_VERIFICATION_REQUIRED");
     expect(cookieNames(signIn).some((name) => name.includes("session_token"))).toBe(false);
   });
 });

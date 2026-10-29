@@ -233,6 +233,8 @@ export type AuthSignInOptions = z.infer<typeof authSignInOptionsSchema>;
 
 export const authAccountSecuritySchema = z.object({
   twoFactorEnabled: z.boolean(),
+  /** False for accounts with no password (e.g. handoff-provisioned); two-factor setup needs one. */
+  hasPassword: z.boolean(),
 });
 
 export type AuthAccountSecurity = z.infer<typeof authAccountSecuritySchema>;

@@ -7395,7 +7395,7 @@ registry.registerPath({
   method: "get",
   path: "/api/auth/account-security",
   tags: ["auth"],
-  summary: "Get the current user's two-factor state",
+  summary: "Get the current user's two-factor and password state",
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 

@@ -142,6 +142,8 @@ export function TwoFactorSettings() {
   }
 
   const enabled = securityQuery.data.twoFactorEnabled;
+  // Every two-factor change re-checks the password, so an account without one cannot make any.
+  const hasPassword = securityQuery.data.hasPassword;
   const manualKey = enrollment ? totpSecretFromUri(enrollment.totpURI) : null;
 
   return (
@@ -153,9 +155,11 @@ export function TwoFactorSettings() {
           <span className="text-xs text-muted-foreground">{enabled ? "On" : "Off"}</span>
         </div>
         <p className="text-sm text-muted-foreground">
-          {enabled
-            ? "Sign-in with your password also asks for a code from your authenticator app."
-            : "Ask for a code from an authenticator app after you sign in with your password."}
+          {!hasPassword
+            ? "Authenticator codes protect password sign-in. This account signs in without a password, so there is nothing to set up."
+            : enabled
+              ? "Sign-in with your password also asks for a code from your authenticator app."
+              : "Ask for a code from an authenticator app after you sign in with your password."}
         </p>
       </div>
 
@@ -233,7 +237,7 @@ export function TwoFactorSettings() {
             </Button>
           </div>
         </form>
-      ) : (
+      ) : !hasPassword ? null : (
         <div className="flex flex-wrap items-center gap-2">
           {enabled ? (
             <>

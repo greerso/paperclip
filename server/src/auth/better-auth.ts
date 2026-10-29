@@ -2,8 +2,8 @@ import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
 import { isIP } from "node:net";
 import { passkey } from "@better-auth/passkey";
+import { APIError } from "@better-auth/core/error";
 import { betterAuth, type Auth } from "better-auth";
-import { APIError } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
 import { twoFactor } from "better-auth/plugins";
@@ -310,7 +310,8 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     publicUrl,
   });
 
-  const passkeyRelyingParty = resolvePasskeyRelyingParty(publicUrl);
+  // Same URL as `baseURL`, whose origin `deriveAuthTrustedOrigins` always trusts.
+  const passkeyRelyingParty = resolvePasskeyRelyingParty(baseUrl);
   const workspaceHandoffIdentity = resolveWorkspaceHandoffIdentity(config);
 
   const authConfig = {
@@ -347,7 +348,9 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
               rpID: passkeyRelyingParty.rpID,
               rpName: AUTH_APP_NAME,
               origin: passkeyRelyingParty.origin,
-              authenticatorSelection: { userVerification: "required" },
+              // Signed-out sign-in sends no `allowCredentials`, so only a discoverable credential can
+              // ever be offered there.
+              authenticatorSelection: { residentKey: "required", userVerification: "required" },
               // The plugin verifies both ceremonies with `requireUserVerification: false`
               // and asks for UV only as "preferred" at sign-in, so the selection above is
               // a registration hint. A passkey sign-in skips both the password and TOTP,

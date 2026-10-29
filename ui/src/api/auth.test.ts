@@ -85,3 +85,27 @@ describe("authApi.regenerateBackupCodes", () => {
     );
   });
 });
+
+describe("authApi.signInPasskey", () => {
+  it("asks the authenticator for user verification before the ceremony", async () => {
+    const startAuthentication = vi.fn().mockResolvedValue({ id: "credential" });
+    vi.doMock("@simplewebauthn/browser", () => ({ startAuthentication }));
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ challenge: "abc", userVerification: "preferred" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ session: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await authApi.signInPasskey();
+
+    expect(startAuthentication).toHaveBeenCalledWith({
+      optionsJSON: { challenge: "abc", userVerification: "required" },
+    });
+    vi.doUnmock("@simplewebauthn/browser");
+  });
+});

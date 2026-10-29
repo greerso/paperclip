@@ -9,9 +9,12 @@ type ChallengeMode = "totp" | "backup";
 export function TwoFactorChallenge({
   onVerified,
   onCancel,
+  onExpired,
 }: {
   onVerified: () => Promise<void> | void;
   onCancel: () => void;
+  /** The challenge cookie lapsed (10 minutes), so no code can succeed; restart sign-in. */
+  onExpired: () => void;
 }) {
   const codeId = useId();
   const trustId = useId();
@@ -20,7 +23,6 @@ export function TwoFactorChallenge({
   const [code, setCode] = useState("");
   const [trustDevice, setTrustDevice] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [verified, setVerified] = useState(false);
 
   // Authenticator apps often display codes as "123 456"; codes never contain whitespace.
   const normalizedCode = code.replace(/\s+/g, "");
@@ -44,15 +46,18 @@ export function TwoFactorChallenge({
     },
     onSuccess: () => {
       setError(null);
-      setVerified(true);
       completion.mutate();
     },
     onError: (err) => {
+      if ((err as { code?: unknown } | null)?.code === "INVALID_TWO_FACTOR_COOKIE") {
+        onExpired();
+        return;
+      }
       setError(err instanceof Error ? err.message : "Verification failed");
     },
   });
 
-  if (verified) {
+  if (mutation.isSuccess) {
     if (!completion.error) {
       return <p className="mt-6 text-sm text-muted-foreground">Signing you in…</p>;
     }

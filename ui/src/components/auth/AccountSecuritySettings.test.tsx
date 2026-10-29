@@ -56,7 +56,7 @@ describe("AccountSecuritySettings", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    mockAuthApi.getAccountSecurity.mockResolvedValue({ twoFactorEnabled: false });
+    mockAuthApi.getAccountSecurity.mockResolvedValue({ twoFactorEnabled: false, hasPassword: true });
     mockAuthApi.getSignInOptions.mockResolvedValue({ passkeyOrigin: null });
     mockAuthApi.enableTwoFactor.mockResolvedValue({
       totpURI: TOTP_URI,
@@ -111,7 +111,7 @@ describe("AccountSecuritySettings", () => {
     expect(container.textContent).toContain("aaaaa-bbbbb");
     expect(container.querySelector('img[alt="Authenticator setup QR code"]')).not.toBeNull();
 
-    mockAuthApi.getAccountSecurity.mockResolvedValue({ twoFactorEnabled: true });
+    mockAuthApi.getAccountSecurity.mockResolvedValue({ twoFactorEnabled: true, hasPassword: true });
     await act(async () => {
       setInputValue(container.querySelector('input[autocomplete="one-time-code"]') as HTMLInputElement, " 123456 ");
     });
@@ -128,7 +128,7 @@ describe("AccountSecuritySettings", () => {
   });
 
   it("requires the password to turn two-factor off", async () => {
-    mockAuthApi.getAccountSecurity.mockResolvedValue({ twoFactorEnabled: true });
+    mockAuthApi.getAccountSecurity.mockResolvedValue({ twoFactorEnabled: true, hasPassword: true });
     await mount();
 
     await act(async () => {
@@ -137,7 +137,7 @@ describe("AccountSecuritySettings", () => {
     await act(async () => {
       setInputValue(container.querySelector('input[type="password"]') as HTMLInputElement, "supersecret");
     });
-    mockAuthApi.getAccountSecurity.mockResolvedValue({ twoFactorEnabled: false });
+    mockAuthApi.getAccountSecurity.mockResolvedValue({ twoFactorEnabled: false, hasPassword: true });
     await act(async () => {
       findButton(container, "Turn off two-factor")!.click();
     });
@@ -146,6 +146,14 @@ describe("AccountSecuritySettings", () => {
 
     expect(mockAuthApi.disableTwoFactor).toHaveBeenCalledWith({ password: "supersecret" });
     expect(findButton(container, "Set up authenticator app")).toBeDefined();
+  });
+
+  it("hides authenticator setup for an account that has no password", async () => {
+    mockAuthApi.getAccountSecurity.mockResolvedValue({ twoFactorEnabled: false, hasPassword: false });
+    await mount();
+
+    expect(container.textContent).toContain("signs in without a password");
+    expect(findButton(container, "Set up authenticator app")).toBeUndefined();
   });
 
   it("explains why passkeys are unavailable instead of offering them", async () => {

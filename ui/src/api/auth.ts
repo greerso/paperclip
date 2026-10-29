@@ -257,11 +257,12 @@ export const authApi = {
   },
 
   signInPasskey: async () => {
-    const optionsJSON = await authGet("/passkey/generate-authenticate-options");
+    const optionsJSON = await authGet("/passkey/generate-authenticate-options") as PublicKeyCredentialRequestOptionsJSON;
+    // The plugin asks only for "preferred"; the server rejects ceremonies without
+    // user verification, so have the authenticator demand a PIN or biometric up front.
+    optionsJSON.userVerification = "required";
     const { startAuthentication } = await import("@simplewebauthn/browser");
-    const response = await startAuthentication({
-      optionsJSON: optionsJSON as PublicKeyCredentialRequestOptionsJSON,
-    });
+    const response = await startAuthentication({ optionsJSON });
     await authPost("/passkey/verify-authentication", { response });
   },
 

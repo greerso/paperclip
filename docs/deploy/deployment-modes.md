@@ -69,15 +69,22 @@ under **Settings → Profile → Sign-in security**.
   shows 10 one-time backup codes at setup. After that, password sign-in asks
   for a code from the app or a backup code. The user can trust a device for
   30 days.
+  Accounts without a password (for example, ones created through workspace
+  handoff) cannot turn it on, because every change asks for the password.
 - **Passkeys**: available only when the instance has a stable public URL that
-  a browser accepts as a WebAuthn relying party. Set `PAPERCLIP_PUBLIC_URL`
-  (or an explicit authentication public URL) to an `https://` URL with a
+  a browser accepts as a WebAuthn relying party. Paperclip uses the explicit
+  authentication public URL, the same one it trusts for sign-in
+  (the first set of `PAPERCLIP_AUTH_PUBLIC_BASE_URL`, `BETTER_AUTH_URL`,
+  `BETTER_AUTH_BASE_URL`, `PAPERCLIP_PUBLIC_URL`, or `auth.publicBaseUrl` in
+  the config file). Set it to an `https://` URL with a
   hostname, or to `http://localhost` for local development. IP-address URLs
   and plain `http://` hostnames do not support passkeys. Passkeys work only on
   pages served from that exact origin: on any other allowed hostname (a LAN
   name, loopback) Paperclip hides passkey sign-in and links to the public URL.
   Changing the public hostname invalidates passkeys registered for the old
-  hostname.
+  hostname. A passkey must unlock with a PIN or biometric. Security keys that
+  only take a touch are rejected, because a passkey sign-in skips both the
+  password and the authenticator code.
 
 Both options are per user and off by default.
 

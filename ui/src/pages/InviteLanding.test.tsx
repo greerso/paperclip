@@ -824,6 +824,78 @@ describe("InviteLandingPage", () => {
     });
   });
 
+  it("reports a failure to finish the invite after the two-factor code is accepted", async () => {
+    getSessionMock.mockResolvedValueOnce(null);
+    getSessionMock.mockResolvedValue({
+      session: { id: "session-1", userId: "user-1" },
+      user: {
+        id: "user-1",
+        name: "Jane Example",
+        email: "jane@example.com",
+        image: null,
+      },
+    });
+    signInEmailMock.mockResolvedValue({ twoFactorRequired: true });
+    verifyTotpMock.mockResolvedValue(undefined);
+    listCompaniesMock.mockRejectedValue(new Error("Failed to load companies"));
+    acceptInviteMock.mockReturnValue(new Promise(() => {}));
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      renderInviteLanding(root, queryClient);
+    });
+    await flushReact();
+    await flushReact();
+
+    const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    const existingAccountButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "I already have an account",
+    );
+    await act(async () => {
+      existingAccountButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    const emailInput = container.querySelector('input[name="email"]') as HTMLInputElement;
+    const passwordInput = container.querySelector('input[name="password"]') as HTMLInputElement;
+    await act(async () => {
+      inputValueSetter!.call(emailInput, "jane@example.com");
+      emailInput.dispatchEvent(new Event("input", { bubbles: true }));
+      inputValueSetter!.call(passwordInput, "supersecret");
+      passwordInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const authForm = container.querySelector('[data-testid="invite-inline-auth"]') as HTMLFormElement;
+    await act(async () => {
+      authForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await flushReact();
+    await flushReact();
+
+    const codeInput = container.querySelector('input[name="code"]') as HTMLInputElement;
+    await act(async () => {
+      inputValueSetter!.call(codeInput, "123456");
+      codeInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      (codeInput.form as HTMLFormElement).dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(verifyTotpMock).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('input[name="code"]')).toBeNull();
+    expect(container.textContent).toContain("You are signed in, but Paperclip could not finish loading");
+    expect(container.textContent).toContain("Failed to load companies");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   // The `["companies"]` cache entry is shared app-wide and carries no account
   // identity, so a list fetched moments ago for a different account is still inside
   // the app-wide staleTime. Membership decisions on this page — the post-sign-in

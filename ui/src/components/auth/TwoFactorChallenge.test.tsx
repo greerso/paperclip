@@ -62,12 +62,12 @@ describe("TwoFactorChallenge", () => {
     vi.clearAllMocks();
   });
 
-  async function mount(onVerified: () => Promise<void>, onCancel = vi.fn()) {
+  async function mount(onVerified: () => Promise<void>, onCancel = vi.fn(), onExpired = vi.fn()) {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     await act(async () => {
       root.render(
         <QueryClientProvider client={queryClient}>
-          <TwoFactorChallenge onVerified={onVerified} onCancel={onCancel} />
+          <TwoFactorChallenge onVerified={onVerified} onCancel={onCancel} onExpired={onExpired} />
         </QueryClientProvider>,
       );
     });
@@ -114,5 +114,32 @@ describe("TwoFactorChallenge", () => {
 
     expect(onVerified).toHaveBeenCalledTimes(2);
     expect(mockAuthApi.verifyTotp).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends the user back to the password step once the challenge cookie has expired", async () => {
+    mockAuthApi.verifyTotp.mockRejectedValue(
+      Object.assign(new Error("Invalid two factor cookie"), { code: "INVALID_TWO_FACTOR_COOKIE" }),
+    );
+    const onVerified = vi.fn();
+    const onExpired = vi.fn();
+    await mount(onVerified, vi.fn(), onExpired);
+
+    await submitCode("123456");
+
+    expect(onExpired).toHaveBeenCalledTimes(1);
+    expect(onVerified).not.toHaveBeenCalled();
+  });
+
+  it("keeps the challenge open for a wrong code", async () => {
+    mockAuthApi.verifyTotp.mockRejectedValue(
+      Object.assign(new Error("Invalid code"), { code: "INVALID_CODE" }),
+    );
+    const onExpired = vi.fn();
+    await mount(vi.fn(), vi.fn(), onExpired);
+
+    await submitCode("000000");
+
+    expect(onExpired).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Invalid code");
   });
 });

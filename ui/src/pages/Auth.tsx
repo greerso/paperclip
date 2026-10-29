@@ -71,6 +71,19 @@ export function AuthPage() {
     navigate(nextPath, { replace: true });
   }
 
+  // Kept apart from the sign-in mutations: by now the session exists, so a failure
+  // here is not a sign-in failure and retrying the credentials would not help.
+  const completion = useMutation({
+    mutationFn: completeSignIn,
+    onError: (err) => {
+      setError(
+        `You are signed in, but Paperclip could not finish loading: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }. Refresh the page to continue.`,
+      );
+    },
+  });
+
   const mutation = useMutation({
     mutationFn: async () => {
       if (mode === "sign_in") {
@@ -83,14 +96,14 @@ export function AuthPage() {
       });
       return { twoFactorRequired: false };
     },
-    onSuccess: async (result) => {
+    onSuccess: (result) => {
       if (result.twoFactorRequired) {
         setError(null);
         setPassword("");
         setTwoFactorPending(true);
         return;
       }
-      await completeSignIn();
+      completion.mutate();
     },
     onError: (err) => {
       setError(err instanceof Error ? err.message : "Authentication failed");
@@ -99,12 +112,13 @@ export function AuthPage() {
 
   const passkeyMutation = useMutation({
     mutationFn: () => authApi.signInPasskey(),
-    onSuccess: completeSignIn,
+    onSuccess: () => completion.mutate(),
     onError: (err) => {
       setError(passkeyErrorMessage(err, "Passkey sign-in failed"));
     },
   });
 
+  const signInBusy = mutation.isPending || passkeyMutation.isPending || completion.isPending;
   const canSubmit =
     email.trim().length > 0 &&
     password.trim().length > 0 &&
@@ -151,6 +165,10 @@ export function AuthPage() {
                     setError(null);
                     setTwoFactorPending(false);
                   }}
+                  onExpired={() => {
+                    setTwoFactorPending(false);
+                    setError("Your sign-in timed out. Enter your password again.");
+                  }}
                 />
             </>
           ) : (
@@ -170,7 +188,7 @@ export function AuthPage() {
               action={mode === "sign_up" ? "/api/auth/sign-up/email" : "/api/auth/sign-in/email"}
               onSubmit={(event) => {
                 event.preventDefault();
-                if (mutation.isPending) return;
+                if (signInBusy) return;
                 if (!canSubmit) {
                   setError("Please fill in all required fields.");
                   return;
@@ -236,11 +254,11 @@ export function AuthPage() {
               )}
               <Button
                 type="submit"
-                disabled={mutation.isPending || passkeyMutation.isPending}
-                aria-disabled={!canSubmit || mutation.isPending}
-                className={`w-full ${!canSubmit && !mutation.isPending ? "opacity-50" : ""}`}
+                disabled={signInBusy}
+                aria-disabled={!canSubmit || signInBusy}
+                className={`w-full ${!canSubmit && !signInBusy ? "opacity-50" : ""}`}
               >
-                {mutation.isPending
+                {mutation.isPending || completion.isPending
                   ? "Working…"
                   : mode === "sign_in"
                     ? "Sign In"
@@ -251,7 +269,7 @@ export function AuthPage() {
                   type="button"
                   variant="outline"
                   className="w-full"
-                  disabled={mutation.isPending || passkeyMutation.isPending}
+                  disabled={signInBusy}
                   onClick={() => {
                     setError(null);
                     passkeyMutation.mutate();
