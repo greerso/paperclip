@@ -95,6 +95,10 @@ export function parseRemoteHttpHostRoutes(raw: string | undefined): ReadonlyMap<
     throw new TypeError("PAPERCLIP_REMOTE_HTTP_HOST_ROUTES must be a JSON object of hostname to origin");
   }
   for (const [hostname, target] of Object.entries(parsed)) {
+    const keyUrl = URL.canParse(`http://${hostname}`) ? new URL(`http://${hostname}`) : null;
+    if (!keyUrl || keyUrl.host !== hostname.toLowerCase() || keyUrl.port !== "") {
+      throw new TypeError(`PAPERCLIP_REMOTE_HTTP_HOST_ROUTES: ${hostname} must be a bare hostname`);
+    }
     const origin = typeof target === "string" && URL.canParse(target) ? new URL(target) : null;
     if (!origin || (origin.protocol !== "http:" && origin.protocol !== "https:") || origin.origin !== target.replace(/\/$/, "")) {
       throw new TypeError(`PAPERCLIP_REMOTE_HTTP_HOST_ROUTES: ${hostname} must map to a bare http(s) origin`);
@@ -178,14 +182,44 @@ async function fetchRouted(
   const timer = setTimeout(() => controller.abort(timeoutError), deadlineMs);
   timer.unref?.();
   const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+  let response: Response;
   try {
-    return await fetchUnpinned(platformFetch, target, { ...init, signal }, options);
+    response = await fetchUnpinned(platformFetch, target, { ...init, signal }, options);
   } catch (error) {
     if (controller.signal.aborted && !init.signal?.aborted) throw timeoutError;
     throw error;
   } finally {
     clearTimeout(timer);
   }
+  if (!response.body || NULL_BODY_STATUSES.has(response.status)) return response;
+
+  // Body idle deadline, matching the pinned path: a read that waits longer than
+  // `responseTimeoutMs` for the next chunk aborts the request.
+  const idleMs = options.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS;
+  const stalledError = markRemoteConnectionFailure(
+    options.error("Remote MCP endpoint stalled mid-response", "remote_http_response_timeout"),
+    "connection_timeout",
+  );
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(output) {
+      const idle = setTimeout(() => controller.abort(stalledError), idleMs);
+      idle.unref?.();
+      try {
+        const { done, value } = await reader.read();
+        if (done) output.close();
+        else output.enqueue(value);
+      } catch (error) {
+        output.error(controller.signal.aborted && !init.signal?.aborted ? stalledError : error);
+      } finally {
+        clearTimeout(idle);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 async function fetchUnpinned(

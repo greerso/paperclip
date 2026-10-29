@@ -751,7 +751,27 @@ describe("guarded remote HTTP fetch, operator host routes", () => {
     expect(failure).toMatchObject({ code: "remote_http_response_timeout" });
   });
 
+  it("holds a routed body to the idle deadline", async () => {
+    const internal = await startServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write("{");
+      // never finishes
+    });
+    const response = await guardedRemoteHttpFetch("https://app.example.test/mcp", {}, {
+      allowPrivateNetwork: true,
+      routeOperatorHosts: true,
+      error: guardError,
+      connectTimeoutMs: 50,
+      responseTimeoutMs: 100,
+      hostRoutes: parseRemoteHttpHostRoutes(JSON.stringify({ "app.example.test": `http://127.0.0.1:${internal.port}` })),
+    });
+    const failure = await response.text().catch((error) => error);
+    expect(failure).toMatchObject({ code: "remote_http_response_timeout" });
+  });
+
   it("parses PAPERCLIP_REMOTE_HTTP_HOST_ROUTES strictly", () => {
+    expect(() => parseRemoteHttpHostRoutes('{"a.test:8443":"http://a:3000"}')).toThrow(/bare hostname/);
+    expect(() => parseRemoteHttpHostRoutes('{"a.test/x":"http://a:3000"}')).toThrow(/bare hostname/);
     expect(parseRemoteHttpHostRoutes(undefined).size).toBe(0);
     expect(parseRemoteHttpHostRoutes(" ").size).toBe(0);
     expect([...parseRemoteHttpHostRoutes('{"A.test":"http://a:3000/"}')]).toEqual([["a.test", "http://a:3000"]]);
