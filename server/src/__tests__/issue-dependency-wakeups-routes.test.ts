@@ -1,7 +1,9 @@
+import { getTableName } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
   buildIssueBlockersResolvedWakeStateKey,
 } from "../services/issue-dependency-wakeups.ts";
 
@@ -17,6 +19,7 @@ import {
 vi.setConfig({ testTimeout: 30000 });
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
+const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
 const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
@@ -31,6 +34,13 @@ const mockIssueService = vi.hoisted(() => ({
   listWakeableBlockedDependents: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
   findMentionedAgents: vi.fn(async () => []),
+  checkout: vi.fn(),
+  assertCheckoutOwner: vi.fn(async () => ({})),
+  addComment: vi.fn(async (_id: string, body: string) => ({
+    id: "comment-1",
+    body,
+    createdAt: new Date().toISOString(),
+  })),
 }));
 
 vi.mock("../services/index.js", () => ({
@@ -40,7 +50,12 @@ vi.mock("../services/index.js", () => ({
   accessService: () => ({
     canUser: vi.fn(),
     decide: vi.fn(async (input: { action: string }) => ({
-      allowed: input.action === "issue:read" || input.action === "project:read",
+      allowed:
+        input.action === "issue:read" ||
+        input.action === "issue:mutate" ||
+        input.action === "issue:comment" ||
+        input.action === "project:read" ||
+        input.action === "tasks:manage_active_checkouts",
       action: input.action,
       reason: "allow_test_read",
       explanation: "The fixture actor can read the task.",
@@ -99,7 +114,7 @@ vi.mock("../services/index.js", () => ({
     expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
   }),
   issueService: () => mockIssueService,
-  logActivity: vi.fn(async () => undefined),
+  logActivity: mockLogActivity,
   projectService: () => ({
     getById: vi.fn(),
     listByIds: vi.fn(async () => []),
@@ -123,20 +138,66 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
   };
 });
 
-async function createApp() {
-  const emptyRows: unknown[] = [];
-  const whereResult = {
-    limit: vi.fn(async () => emptyRows),
-    then: async (resolve: (rows: unknown[]) => unknown) => resolve(emptyRows),
+const boardActor = {
+  type: "board" as const,
+  userId: "local-board",
+  companyIds: ["company-1"],
+  source: "local_implicit" as const,
+  isInstanceAdmin: false,
+};
+
+function agentActor(agentId: string) {
+  return {
+    type: "agent" as const,
+    agentId,
+    companyId: "company-1",
+    companyIds: ["company-1"],
+    source: "agent_jwt" as const,
+    runId: "44444444-4444-4444-8444-444444444444",
+    isInstanceAdmin: false,
   };
-  const query: Record<string, unknown> = {};
-  query.innerJoin = vi.fn(() => query);
-  query.where = vi.fn(() => whereResult);
+}
+
+function tableNameOf(table: unknown): string {
+  try {
+    return getTableName(table as never);
+  } catch {
+    return "";
+  }
+}
+
+async function createApp(options?: {
+  actor?: Record<string, unknown>;
+  rowsForTable?: (tableName: string) => unknown[] | null;
+}) {
+  const emptyRows: unknown[] = [];
+  const rowsFor = (table: unknown) => options?.rowsForTable?.(tableNameOf(table)) ?? emptyRows;
+  // Thenable proxy so route queries can chain where/orderBy/for/limit without
+  // each new call site teaching the fixture another method name.
+  const chainFor = (rows: unknown[]) => {
+    const target: Record<string | symbol, unknown> = {
+      then: (
+        resolve: (value: unknown[]) => unknown,
+        reject?: (err: unknown) => unknown,
+      ) => Promise.resolve(rows).then(resolve, reject),
+      catch: (reject: (err: unknown) => unknown) => Promise.resolve(rows).catch(reject),
+      finally: (fn: () => void) => Promise.resolve(rows).finally(fn),
+    };
+    const query: unknown = new Proxy(target, {
+      get(obj, prop) {
+        if (prop in obj) return obj[prop];
+        return () => query;
+      },
+    });
+    return query;
+  };
   const routeDb = {
     select: vi.fn(() => ({
-      from: vi.fn(() => query),
+      from: vi.fn((table: unknown) => chainFor(rowsFor(table))),
     })),
-    transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
+    update: vi.fn(() => chainFor(emptyRows)),
+    insert: vi.fn(() => chainFor(emptyRows)),
+    transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(routeDb),
   };
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
@@ -145,13 +206,7 @@ async function createApp() {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = options?.actor ?? boardActor;
     next();
   });
   app.use("/api", issueRoutes(routeDb as any, {} as any));
@@ -187,6 +242,15 @@ describe("issue dependency wakeups in issue routes", () => {
     });
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
+    mockIssueService.checkout.mockReset();
+    mockIssueService.assertCheckoutOwner.mockReset();
+    mockIssueService.assertCheckoutOwner.mockResolvedValue({});
+    mockIssueService.addComment.mockReset();
+    mockIssueService.addComment.mockImplementation(async (_id: string, body: string) => ({
+      id: "comment-1",
+      body,
+      createdAt: new Date().toISOString(),
+    }));
   });
 
   it("wakes dependents when the final blocker transitions to done", async () => {
@@ -686,5 +750,314 @@ describe("issue dependency wakeups in issue routes", () => {
     expect(res.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  const assigneeId = "11111111-1111-4111-8111-111111111111";
+  const otherAgentId = "22222222-2222-4222-8222-222222222222";
+  const replayIssueId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const replayBlockerId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const otherBlockerId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+  function readyBlockers(issueId: string, blockerIds: string[]) {
+    mockIssueService.getDependencyReadiness.mockResolvedValue({
+      issueId,
+      blockerIssueIds: blockerIds,
+      unresolvedBlockerIssueIds: [],
+      unresolvedBlockerCount: 0,
+      pendingFinalizeBlockerIssueIds: [],
+      allBlockersDone: true,
+      isDependencyReady: true,
+    });
+  }
+
+  function blockersResolvedWakes() {
+    return mockWakeup.mock.calls.filter(
+      (call) => call[1]?.reason === "issue_blockers_resolved",
+    );
+  }
+
+  // Entering blocked with every blocker already done still needs a descriptor
+  // or a pending card. The descriptor is not a blocker-set change.
+  function unblockDescriptorFor(agentId: string) {
+    return { owner: { agentId }, action: "Wait for the merge card" };
+  }
+
+  function rowsForAgentRun(agentId: string, issueId: string) {
+    return (name: string) => {
+      if (name === "heartbeat_runs") {
+        return [{
+          id: "44444444-4444-4444-8444-444444444444",
+          companyId: "company-1",
+          agentId,
+          contextSnapshot: { issueId },
+        }];
+      }
+      if (name === "agents") {
+        return [{ id: agentId, companyId: "company-1" }];
+      }
+      return null;
+    };
+  }
+
+  it("gives 0 blockers-resolved wakes across five MAG-1009 checkout and self-block laps", async () => {
+    readyBlockers(replayIssueId, [replayBlockerId]);
+    mockIssueService.getRelationSummaries.mockResolvedValue({
+      blockedBy: [{ id: replayBlockerId }],
+      blocks: [],
+    });
+    mockIssueService.checkout.mockImplementation(async () =>
+      issueRecord({
+        id: replayIssueId,
+        identifier: "MAG-1009",
+        status: "in_progress",
+        assigneeAgentId: assigneeId,
+        checkoutRunId: "44444444-4444-4444-8444-444444444444",
+      }),
+    );
+    const app = await createApp({
+      actor: agentActor(assigneeId),
+      rowsForTable: rowsForAgentRun(assigneeId, replayIssueId),
+    });
+
+    for (let lap = 0; lap < 5; lap += 1) {
+      mockIssueService.getById.mockResolvedValue(issueRecord({
+        id: replayIssueId,
+        identifier: "MAG-1009",
+        status: "blocked",
+        assigneeAgentId: assigneeId,
+        blockedTransitionAt: new Date(Date.UTC(2026, 10, 5, 15, lap, 0)),
+      }));
+      const checkout = await request(app)
+        .post(`/api/issues/${replayIssueId}/checkout`)
+        .send({ agentId: assigneeId, expectedStatuses: ["blocked", "todo", "in_progress"] });
+      expect(checkout.status, JSON.stringify(checkout.body)).toBe(200);
+
+      mockIssueService.getById.mockResolvedValue(issueRecord({
+        id: replayIssueId,
+        identifier: "MAG-1009",
+        status: "in_progress",
+        assigneeAgentId: assigneeId,
+        checkoutRunId: "44444444-4444-4444-8444-444444444444",
+        blockedTransitionAt: null,
+      }));
+      mockIssueService.update.mockResolvedValue(issueRecord({
+        id: replayIssueId,
+        identifier: "MAG-1009",
+        status: "blocked",
+        assigneeAgentId: assigneeId,
+        blockedTransitionAt: new Date(Date.UTC(2026, 10, 5, 15, 12 + lap, 0)),
+      }));
+      const patched = await request(app).patch(`/api/issues/${replayIssueId}`).send({
+        status: "blocked",
+        comment: "still blocked",
+        unblockDescriptor: unblockDescriptorFor(assigneeId),
+      });
+      expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(blockersResolvedWakes()).toEqual([]);
+  });
+
+  it("wakes once when the board re-blocks an issue whose blockers are already done", async () => {
+    readyBlockers(replayIssueId, [replayBlockerId]);
+    mockIssueService.getById.mockResolvedValue(issueRecord({
+      id: replayIssueId,
+      status: "in_progress",
+      assigneeAgentId: assigneeId,
+    }));
+    mockIssueService.update.mockResolvedValue(issueRecord({
+      id: replayIssueId,
+      status: "blocked",
+      assigneeAgentId: assigneeId,
+      blockedTransitionAt: new Date("2026-11-05T16:00:00.000Z"),
+    }));
+
+    const res = await request(await createApp())
+      .patch(`/api/issues/${replayIssueId}`)
+      .send({
+        status: "blocked",
+        unblockDescriptor: { owner: "board", action: "Re-block after board review" },
+      });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    await vi.waitFor(() => {
+      expect(blockersResolvedWakes()).toHaveLength(1);
+    });
+  });
+
+  it("wakes once when the assignee changes the blocker set", async () => {
+    readyBlockers(replayIssueId, [otherBlockerId]);
+    mockIssueService.getRelationSummaries.mockResolvedValue({
+      blockedBy: [{ id: replayBlockerId }],
+      blocks: [],
+    });
+    mockIssueService.getById.mockResolvedValue(issueRecord({
+      id: replayIssueId,
+      status: "in_progress",
+      assigneeAgentId: assigneeId,
+      checkoutRunId: "44444444-4444-4444-8444-444444444444",
+    }));
+    mockIssueService.update.mockResolvedValue(issueRecord({
+      id: replayIssueId,
+      status: "blocked",
+      assigneeAgentId: assigneeId,
+      blockedTransitionAt: new Date("2026-11-05T16:05:00.000Z"),
+    }));
+
+    const res = await request(await createApp({
+      actor: agentActor(assigneeId),
+      rowsForTable: rowsForAgentRun(assigneeId, replayIssueId),
+    }))
+      .patch(`/api/issues/${replayIssueId}`)
+      .send({
+        status: "blocked",
+        blockedByIssueIds: [otherBlockerId],
+        unblockDescriptor: unblockDescriptorFor(assigneeId),
+      });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    await vi.waitFor(() => {
+      expect(blockersResolvedWakes()).toHaveLength(1);
+    });
+  });
+
+  it("does not wake when the assignee re-sends the same blocker set", async () => {
+    readyBlockers(replayIssueId, [replayBlockerId]);
+    mockIssueService.getRelationSummaries.mockResolvedValue({
+      blockedBy: [{ id: replayBlockerId }],
+      blocks: [],
+    });
+    mockIssueService.getById.mockResolvedValue(issueRecord({
+      id: replayIssueId,
+      status: "in_progress",
+      assigneeAgentId: assigneeId,
+      checkoutRunId: "44444444-4444-4444-8444-444444444444",
+    }));
+    mockIssueService.update.mockResolvedValue(issueRecord({
+      id: replayIssueId,
+      status: "blocked",
+      assigneeAgentId: assigneeId,
+      blockedTransitionAt: new Date("2026-11-05T16:06:00.000Z"),
+    }));
+
+    const res = await request(await createApp({
+      actor: agentActor(assigneeId),
+      rowsForTable: rowsForAgentRun(assigneeId, replayIssueId),
+    }))
+      .patch(`/api/issues/${replayIssueId}`)
+      .send({
+        status: "blocked",
+        blockedByIssueIds: [replayBlockerId],
+        unblockDescriptor: unblockDescriptorFor(assigneeId),
+      });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(blockersResolvedWakes()).toEqual([]);
+  });
+
+  it("wakes once when another agent re-blocks", async () => {
+    readyBlockers(replayIssueId, [replayBlockerId]);
+    mockIssueService.getById.mockResolvedValue(issueRecord({
+      id: replayIssueId,
+      status: "todo",
+      assigneeAgentId: assigneeId,
+    }));
+    mockIssueService.update.mockResolvedValue(issueRecord({
+      id: replayIssueId,
+      status: "blocked",
+      assigneeAgentId: assigneeId,
+      blockedTransitionAt: new Date("2026-11-05T16:07:00.000Z"),
+    }));
+
+    const res = await request(await createApp({
+      actor: agentActor(otherAgentId),
+      rowsForTable: rowsForAgentRun(otherAgentId, replayIssueId),
+    }))
+      .patch(`/api/issues/${replayIssueId}`)
+      .send({
+        status: "blocked",
+        unblockDescriptor: unblockDescriptorFor(otherAgentId),
+      });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    await vi.waitFor(() => {
+      expect(blockersResolvedWakes()).toHaveLength(1);
+    });
+  });
+
+  it("suppresses a blocker-done wake while a human_only card is pending", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "done" }));
+    mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
+      {
+        id: "issue-2",
+        assigneeAgentId: "agent-2",
+        blockerIssueIds: ["issue-1"],
+        blockedTransitionAt: new Date("2026-11-05T16:08:00.000Z"),
+      },
+    ]);
+
+    const res = await request(await createApp({
+      rowsForTable: (name) => (name === "issue_thread_interactions" ? [{ id: "card-1" }] : null),
+    })).patch("/api/issues/issue-1").send({ status: "done" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(blockersResolvedWakes()).toEqual([]);
+  });
+
+  it("suppresses a blocker-done wake while a linked approval is pending", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "done" }));
+    mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
+      {
+        id: "issue-2",
+        assigneeAgentId: "agent-2",
+        blockerIssueIds: ["issue-1"],
+        blockedTransitionAt: new Date("2026-11-05T16:09:00.000Z"),
+      },
+    ]);
+
+    const res = await request(await createApp({
+      rowsForTable: (name) => (name === "issue_approvals" ? [{ id: "approval-1" }] : null),
+    })).patch("/api/issues/issue-1").send({ status: "done" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(blockersResolvedWakes()).toEqual([]);
+  });
+
+  it("holds the blockers-resolved cap at 3 wakes in the rolling hour", async () => {
+    const recent = new Date();
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "done" }));
+    mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
+      {
+        id: "issue-2",
+        assigneeAgentId: "agent-2",
+        blockerIssueIds: ["issue-1"],
+        blockedTransitionAt: new Date("2026-11-05T16:10:00.000Z"),
+      },
+    ]);
+    const priorWakes = [0, 1, 2].map((index) => ({
+      status: "completed",
+      requestedAt: recent,
+      payload: {
+        issueId: "issue-2",
+        blockerIssueIds: [`prior-${index}`],
+      },
+    }));
+
+    const res = await request(await createApp({
+      rowsForTable: (name) => (name === "agent_wakeup_requests" ? priorWakes : null),
+    })).patch("/api/issues/issue-1").send({ status: "done" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    await vi.waitFor(() => {
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          action: ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
+          entityId: "issue-2",
+          details: expect.objectContaining({ reason: "hourly_cap", count: 3 }),
+        }),
+      );
+    });
+    expect(blockersResolvedWakes()).toEqual([]);
   });
 });

@@ -117,8 +117,10 @@ import {
 } from "../issue-execution-policy.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
+  findIssueBlockersResolvedWakeSuppression,
 } from "../issue-dependency-wakeups.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
@@ -5753,6 +5755,51 @@ export function recoveryService(
           });
         if (existingWake) {
           result.existingWakeSkipped += 1;
+          continue;
+        }
+
+        const suppression = await findIssueBlockersResolvedWakeSuppression(db, {
+          companyId,
+          dependentIssueId: candidate.id,
+          blockerIssueIds: readiness.blockerIssueIds,
+          source,
+        }).catch((err) => {
+          logger.warn(
+            { err, issueId: candidate.id, source },
+            "failed to check blockers-resolved wake suppression from issue graph liveness backstop",
+          );
+          return null;
+        });
+        if (suppression) {
+          if (suppression.reason === "hourly_cap") {
+            try {
+              await logActivity(db, {
+                companyId,
+                actorType: "system",
+                actorId: "issue_graph_liveness_backstop",
+                agentId,
+                runId: opts?.runId ?? null,
+                action: ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
+                entityType: "issue",
+                entityId: candidate.id,
+                details: {
+                  reason: suppression.reason,
+                  count: suppression.count ?? null,
+                  source,
+                },
+              });
+            } catch (err) {
+              logger.warn(
+                { err, issueId: candidate.id, source },
+                "failed to log blockers-resolved wake suppression from issue graph liveness backstop",
+              );
+            }
+            result.existingWakeSkipped += 1;
+          } else if (suppression.reason === "human_gate") {
+            result.interactionSkipped += 1;
+          } else {
+            result.existingWakeSkipped += 1;
+          }
           continue;
         }
 

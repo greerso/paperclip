@@ -277,8 +277,11 @@ import {
 } from "../services/onboarding-first-task-assets.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
+  findIssueBlockersResolvedWakeSuppression,
+  shouldWakeOnRestoredBlockedDependency,
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
@@ -15409,6 +15412,50 @@ export function issueRoutes(
               "failed to check existing dependency wake before issue update wake",
             );
           }
+          let suppression: Awaited<
+            ReturnType<typeof findIssueBlockersResolvedWakeSuppression>
+          > = null;
+          try {
+            suppression = await findIssueBlockersResolvedWakeSuppression(db, {
+              companyId: issue.companyId,
+              dependentIssueId: input.dependentIssueId,
+              blockerIssueIds: input.blockerIssueIds,
+              source: input.source,
+            });
+          } catch (err) {
+            logger.warn(
+              { err, issueId: input.dependentIssueId, idempotencyKey },
+              "failed to check blockers-resolved wake suppression before issue update wake",
+            );
+          }
+          if (suppression) {
+            if (suppression.reason === "hourly_cap") {
+              try {
+                await logActivity(db, {
+                  companyId: issue.companyId,
+                  actorType: "system",
+                  actorId: "issue_update",
+                  agentId: input.agentId,
+                  runId: actor.runId,
+                  agentApiKeyId: actor.agentApiKeyId,
+                  action: ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
+                  entityType: "issue",
+                  entityId: input.dependentIssueId,
+                  details: {
+                    reason: suppression.reason,
+                    count: suppression.count ?? null,
+                    source: input.source,
+                  },
+                });
+              } catch (err) {
+                logger.warn(
+                  { err, issueId: input.dependentIssueId, idempotencyKey },
+                  "failed to log blockers-resolved wake suppression before issue update wake",
+                );
+              }
+            }
+            return;
+          }
           addWakeup(input.agentId, {
             source: "automation",
             triggerDetail: "system",
@@ -15605,12 +15652,23 @@ export function issueRoutes(
           }
         }
 
-        const restoredBlockedReadyDependency =
-          issue.status === "blocked" &&
-          issue.assigneeAgentId &&
-          (existing.status !== "blocked" ||
-            Array.isArray(req.body.blockedByIssueIds) ||
-            existing.assigneeAgentId !== issue.assigneeAgentId);
+        const requestedBlockerIds = Array.isArray(req.body.blockedByIssueIds)
+          ? req.body.blockedByIssueIds.filter(
+              (id: unknown): id is string => typeof id === "string",
+            )
+          : undefined;
+        const restoredBlockedReadyDependency = shouldWakeOnRestoredBlockedDependency({
+          previousStatus: existing.status,
+          nextStatus: issue.status,
+          previousAssigneeAgentId: existing.assigneeAgentId ?? null,
+          nextAssigneeAgentId: issue.assigneeAgentId ?? null,
+          blockedByIssueIds: requestedBlockerIds,
+          existingBlockerIssueIds: (existingRelations?.blockedBy ?? []).map(
+            (relation) => relation.id,
+          ),
+          actorType: actor.actorType,
+          actorAgentId: actor.agentId,
+        });
         if (
           restoredBlockedReadyDependency &&
           typeof dependencyReadinessSvc.getDependencyReadiness === "function"
@@ -18899,6 +18957,50 @@ export function issueRoutes(
               { err, issueId: input.dependentIssueId, idempotencyKey },
               "failed to check existing dependency wake before issue comment wake",
             );
+          }
+          let suppression: Awaited<
+            ReturnType<typeof findIssueBlockersResolvedWakeSuppression>
+          > = null;
+          try {
+            suppression = await findIssueBlockersResolvedWakeSuppression(db, {
+              companyId: currentIssue.companyId,
+              dependentIssueId: input.dependentIssueId,
+              blockerIssueIds: input.blockerIssueIds,
+              source: "issue.blockers_resolved",
+            });
+          } catch (err) {
+            logger.warn(
+              { err, issueId: input.dependentIssueId, idempotencyKey },
+              "failed to check blockers-resolved wake suppression before issue comment wake",
+            );
+          }
+          if (suppression) {
+            if (suppression.reason === "hourly_cap") {
+              try {
+                await logActivity(db, {
+                  companyId: currentIssue.companyId,
+                  actorType: "system",
+                  actorId: "issue_comment",
+                  agentId: input.agentId,
+                  runId: actor.runId,
+                  agentApiKeyId: actor.agentApiKeyId,
+                  action: ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
+                  entityType: "issue",
+                  entityId: input.dependentIssueId,
+                  details: {
+                    reason: suppression.reason,
+                    count: suppression.count ?? null,
+                    source: "issue.blockers_resolved",
+                  },
+                });
+              } catch (err) {
+                logger.warn(
+                  { err, issueId: input.dependentIssueId, idempotencyKey },
+                  "failed to log blockers-resolved wake suppression before issue comment wake",
+                );
+              }
+            }
+            return;
           }
           addWakeup(input.agentId, {
             source: "automation",
