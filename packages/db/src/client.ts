@@ -4,6 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { installDatabaseWorkSignals } from "./work-signals.js";
+import { DEFAULT_LONG_TRANSACTION_WARN_MS, installTransactionGuard } from "./transaction-guard.js";
 import { installDatabaseResponseCapture } from "./response-capture.js";
 import { installPreparedQueries } from "./prepared-queries.js";
 import * as schema from "./schema/index.js";
@@ -156,6 +157,16 @@ export interface DatabaseClientOptions {
    * `postgres.js`).
    */
   applicationName?: string;
+  /**
+   * PostgreSQL `idle_in_transaction_session_timeout` in milliseconds, sent as a
+   * startup parameter so the server ends a session whose transaction was
+   * opened and never finished. `0` sends an explicit "disabled" (for a pool
+   * that holds a transaction open on purpose); unset sends nothing and the
+   * server default applies.
+   */
+  idleInTransactionTimeoutMs?: number;
+  /** Warn, with the opening stack, when an outermost transaction stays open this long (0 disables). */
+  longTransactionWarnMs?: number;
 }
 
 /**
@@ -166,6 +177,12 @@ export interface DatabaseClientOptions {
  * to restore the driver default.
  */
 export const DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS = 60;
+/**
+ * A session idle inside a transaction this long is ended by the server unless
+ * `DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS` says otherwise (`0` disables). A
+ * leaked transaction otherwise pins one pooled backend forever.
+ */
+export const DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS = 300_000;
 /** `application_name` reported to PostgreSQL unless `DATABASE_APPLICATION_NAME` overrides it. */
 export const DEFAULT_DATABASE_APPLICATION_NAME = "paperclip";
 
@@ -224,6 +241,10 @@ export function databaseClientOptionsFromEnv(env: NodeJS.ProcessEnv = process.en
   if (maxLifetimeSeconds !== undefined) options.maxLifetimeSeconds = maxLifetimeSeconds;
   const applicationName = envNonEmptyString(env, "DATABASE_APPLICATION_NAME");
   if (applicationName !== undefined) options.applicationName = applicationName;
+  const idleInTransactionTimeoutMs = envNonNegativeInteger(env, "DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS");
+  if (idleInTransactionTimeoutMs !== undefined) options.idleInTransactionTimeoutMs = idleInTransactionTimeoutMs;
+  const longTransactionWarnMs = envNonNegativeInteger(env, "DATABASE_LONG_TRANSACTION_WARN_MS");
+  if (longTransactionWarnMs !== undefined) options.longTransactionWarnMs = longTransactionWarnMs;
   return options;
 }
 
@@ -239,6 +260,9 @@ export function resolveDatabaseClientOptions(options: DatabaseClientOptions): Da
     ...options,
     idleTimeoutSeconds: options.idleTimeoutSeconds ?? DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS,
     applicationName: options.applicationName ?? DEFAULT_DATABASE_APPLICATION_NAME,
+    idleInTransactionTimeoutMs:
+      options.idleInTransactionTimeoutMs ?? DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS,
+    longTransactionWarnMs: options.longTransactionWarnMs ?? DEFAULT_LONG_TRANSACTION_WARN_MS,
   };
 }
 
@@ -249,9 +273,12 @@ export function postgresJsOptions(options: DatabaseClientOptions): Record<string
   if (options.idleTimeoutSeconds !== undefined) driverOptions.idle_timeout = options.idleTimeoutSeconds;
   if (options.connectTimeoutSeconds !== undefined) driverOptions.connect_timeout = options.connectTimeoutSeconds;
   if (options.maxLifetimeSeconds !== undefined) driverOptions.max_lifetime = options.maxLifetimeSeconds;
-  if (options.applicationName !== undefined) {
-    driverOptions.connection = { application_name: options.applicationName };
+  const connection: Record<string, string | number> = {};
+  if (options.applicationName !== undefined) connection.application_name = options.applicationName;
+  if (options.idleInTransactionTimeoutMs !== undefined) {
+    connection.idle_in_transaction_session_timeout = options.idleInTransactionTimeoutMs;
   }
+  if (Object.keys(connection).length > 0) driverOptions.connection = connection;
   return driverOptions;
 }
 
@@ -334,9 +361,15 @@ function createDbClient(url: string, resolved: DatabaseClientOptions, owner?: ob
   // message cannot establish that replay is safe. Leave retries to callers
   // that know the complete operation is idempotent.
   const db = installDatabaseWorkSignals(drizzlePg(sql, { schema }), owner);
+  installTransactionGuard(db, {
+    warnAfterMs: resolved.longTransactionWarnMs ?? 0,
+    label: resolved.applicationName ?? DEFAULT_DATABASE_APPLICATION_NAME,
+  });
   installDatabaseResponseCapture(db, schema);
   dedicatedDbFactories.set(db, () => createDbClient(url, {
     ...resolved, maxConnections: 1, applicationName: "paperclip-workspace-finalization-lock",
+    // The advisory-lock transaction stays open, idle, for the whole guarded operation.
+    idleInTransactionTimeoutMs: 0, longTransactionWarnMs: 0,
   }, db));
   livenessDbFactories.set(db, () => createDbClient(url, {
     ...resolved, maxConnections: LIVENESS_POOL_MAX_CONNECTIONS, applicationName: "paperclip-controller-lease",
