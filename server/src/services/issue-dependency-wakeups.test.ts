@@ -362,6 +362,63 @@ describe("suppressionForBlockersResolvedWakeHistory", () => {
   });
 });
 
+function isDrizzleParam(value: object): boolean {
+  const ctor = value.constructor as unknown as { name?: string; [key: symbol]: unknown };
+  return ctor[Symbol.for("drizzle:entityKind")] === "Param" || ctor.name === "Param";
+}
+
+function boundParamValues(condition: unknown): unknown[] {
+  const values: unknown[] = [];
+  const seen = new Set<unknown>();
+  const walk = (value: unknown) => {
+    if (!value || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+    if (isDrizzleParam(value)) {
+      values.push((value as { value: unknown }).value);
+      return;
+    }
+    for (const item of Object.values(value)) walk(item);
+  };
+  walk(condition);
+  return values;
+}
+
+/** Returns the legacy card only when the interaction filter binds `board_only`. */
+function dbReturningHumanGateOnlyForLegacyBoardPolicy(): Db {
+  return {
+    select() {
+      let rows: unknown[] = [];
+      const chain = {
+        from() {
+          return chain;
+        },
+        innerJoin() {
+          return chain;
+        },
+        where(condition: unknown) {
+          const params = boundParamValues(condition);
+          const matchesLegacyHumanGate = params.some(
+            (value) => Array.isArray(value) && value.includes("board_only") && value.includes("human_only"),
+          ) || (params.includes("board_only") && params.includes("human_only"));
+          rows = matchesLegacyHumanGate ? [{ id: "legacy-board-only-card" }] : [];
+          return chain;
+        },
+        limit() {
+          return Promise.resolve(rows);
+        },
+        then(resolve: (value: unknown) => unknown, reject?: (err: unknown) => unknown) {
+          return Promise.resolve(rows).then(resolve, reject);
+        },
+      };
+      return chain;
+    },
+  } as unknown as Db;
+}
+
 function scriptedDb(pages: unknown[][]): Db {
   let call = 0;
   return {
@@ -390,6 +447,20 @@ function scriptedDb(pages: unknown[][]): Db {
 }
 
 describe("findIssueBlockersResolvedWakeSuppression", () => {
+  it("suppresses when the only pending card is stored as board_only", async () => {
+    const decision = await findIssueBlockersResolvedWakeSuppression(
+      dbReturningHumanGateOnlyForLegacyBoardPolicy(),
+      {
+        companyId,
+        dependentIssueId,
+        blockerIssueIds: [blockerIssueId],
+        source: "issue.blockers_resolved",
+        now,
+      },
+    );
+    expect(decision).toEqual({ reason: "human_gate" });
+  });
+
   it("reads a pending human_only interaction and a pending approval as the human gate", async () => {
     const human = await findIssueBlockersResolvedWakeSuppression(scriptedDb([[], [{ id: "card" }], []]), {
       companyId,

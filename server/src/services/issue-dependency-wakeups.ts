@@ -158,8 +158,9 @@ function wakePayloadBlockerIds(payload: unknown): string[] | null {
  *
  * - `issue.blockers_restored`: a completed wake for the same dependent and the
  *   same sorted blocker set in the last 24h covers, whatever `blockedTransitionAt`.
- * - A pending `human_only` interaction or a pending linked approval skips the
- *   wake. The interaction or approval resolution wake takes over.
+ * - A pending `human_only` or legacy `board_only` interaction, or a pending
+ *   linked approval, skips the wake. The interaction or approval resolution
+ *   wake takes over.
  * - More than the hourly cap suppresses. Callers log that case.
  */
 export function suppressionForBlockersResolvedWakeHistory(input: {
@@ -417,7 +418,16 @@ export async function findIssueBlockersResolvedWakeSuppression(
           eq(issueThreadInteractions.companyId, input.companyId),
           eq(issueThreadInteractions.issueId, input.dependentIssueId),
           eq(issueThreadInteractions.status, "pending"),
-          eq(issueThreadInteractions.effectiveResolverPolicy, "human_only"),
+          // Secret proposals and older cards persist `board_only`. Hydration
+          // maps that alias to `human_only` only when the row is read. The
+          // column's $type is the canonical policy, which does not include
+          // the stored alias.
+          inArray(
+            issueThreadInteractions.effectiveResolverPolicy,
+            ["human_only", "board_only"] as unknown as ReadonlyArray<
+              typeof issueThreadInteractions.$inferSelect.effectiveResolverPolicy
+            >,
+          ),
         ),
       )
       .limit(1),
