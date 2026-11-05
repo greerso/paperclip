@@ -24,7 +24,7 @@ export function installTransactionGuard<T extends Connection>(
     const openedAt = Date.now();
     const timer = setTimeout(() => {
       process.emitWarning(
-        `Database transaction on pool "${options.label}" open for ${Date.now() - openedAt}ms\n${holder.stack ?? ""}`,
+        `Database transaction on pool "${options.label}" open or queued for a connection for ${Date.now() - openedAt}ms\n${holder.stack ?? ""}`,
         { code: "PAPERCLIP_LONG_TRANSACTION" },
       );
     }, options.warnAfterMs);
