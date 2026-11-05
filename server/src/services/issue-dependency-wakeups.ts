@@ -1,9 +1,27 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import {
+  agentWakeupRequests,
+  approvals,
+  issueApprovals,
+  issueThreadInteractions,
+} from "@paperclipai/db";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
+export const ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION =
+  "issue.blockers_resolved_wake_suppressed";
+
+/** At most this many blockers-resolved wakes for one dependent in a rolling hour. */
+export const ISSUE_BLOCKERS_RESOLVED_WAKE_HOURLY_CAP = 3;
+
+/** A completed same-set wake inside this window covers a later blockers_restored emit. */
+export const ISSUE_BLOCKERS_RESOLVED_RESTORED_DEDUP_MS = 24 * 60 * 60 * 1000;
+
+const ISSUE_BLOCKERS_RESOLVED_WAKE_HOUR_MS = 60 * 60 * 1000;
+
+// These rows were not delivered wakes. They must not spend the hourly cap.
+const NON_COUNTING_WAKE_STATUSES = new Set(["skipped", "failed", "cancelled"]);
 
 // A wake counts as "already delivered or in flight for the current ready state"
 // for these statuses. The level-triggered state key uses this full set so that
@@ -54,8 +72,133 @@ export function formatIssueBlockersResolvedWakeCycle(
   return parsed.toISOString();
 }
 
-function uniqueSortedBlockerIssueIds(blockerIssueIds: string[]): string[] {
+function uniqueSortedBlockerIssueIds(blockerIssueIds: readonly string[]): string[] {
   return [...new Set(blockerIssueIds.filter(Boolean))].sort();
+}
+
+export function sameBlockerIssueIdSet(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  const a = uniqueSortedBlockerIssueIds(left);
+  const b = uniqueSortedBlockerIssueIds(right);
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
+/**
+ * Whether a transition into `blocked` should wake the assignee because every
+ * recorded blocker is already done.
+ *
+ * The assignee re-blocking itself, without a new blocker set, is a wait on
+ * something outside the blocker graph. Waking it stamps a new
+ * `blockedTransitionAt`, so the cycle key never matches and the agent is
+ * checked out again. Board or other-agent re-blocks, reassignment, and a real
+ * blocker-set change still wake.
+ */
+export function shouldWakeOnRestoredBlockedDependency(input: {
+  previousStatus: string;
+  nextStatus: string;
+  previousAssigneeAgentId: string | null;
+  nextAssigneeAgentId: string | null;
+  /** Undefined when the PATCH body omitted `blockedByIssueIds`. */
+  blockedByIssueIds: readonly string[] | undefined;
+  existingBlockerIssueIds: readonly string[];
+  actorType: string;
+  actorAgentId: string | null;
+}): boolean {
+  if (input.nextStatus !== "blocked" || !input.nextAssigneeAgentId) return false;
+  const assigneeChanged = input.previousAssigneeAgentId !== input.nextAssigneeAgentId;
+  const blockerFieldPresent = input.blockedByIssueIds !== undefined;
+  if (input.previousStatus === "blocked" && !blockerFieldPresent && !assigneeChanged) {
+    return false;
+  }
+  const blockerSetUnchanged =
+    !blockerFieldPresent ||
+    sameBlockerIssueIdSet(input.blockedByIssueIds ?? [], input.existingBlockerIssueIds);
+  const assigneeSelfUnchanged =
+    input.actorType === "agent" &&
+    input.actorAgentId !== null &&
+    input.actorAgentId === input.nextAssigneeAgentId &&
+    !assigneeChanged &&
+    blockerSetUnchanged;
+  return !assigneeSelfUnchanged;
+}
+
+export type IssueBlockersResolvedWakeSuppressionReason =
+  | "recent_same_set"
+  | "human_gate"
+  | "hourly_cap";
+
+export type IssueBlockersResolvedWakeSuppression = {
+  reason: IssueBlockersResolvedWakeSuppressionReason;
+  count?: number;
+};
+
+type BlockersResolvedWakeHistoryRow = {
+  status: string;
+  requestedAt: Date;
+  payload: unknown;
+};
+
+function wakePayloadIssueId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const issueId = (payload as { issueId?: unknown }).issueId;
+  return typeof issueId === "string" ? issueId : null;
+}
+
+function wakePayloadBlockerIds(payload: unknown): string[] | null {
+  if (!payload || typeof payload !== "object") return null;
+  const ids = (payload as { blockerIssueIds?: unknown }).blockerIssueIds;
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) return null;
+  return ids;
+}
+
+/**
+ * Extra gates shared by every blockers-resolved emit path.
+ *
+ * - `issue.blockers_restored`: a completed wake for the same dependent and the
+ *   same sorted blocker set in the last 24h covers, whatever `blockedTransitionAt`.
+ * - A pending `human_only` interaction or a pending linked approval skips the
+ *   wake. The interaction or approval resolution wake takes over.
+ * - More than the hourly cap suppresses. Callers log that case.
+ */
+export function suppressionForBlockersResolvedWakeHistory(input: {
+  source: string;
+  dependentIssueId: string;
+  blockerIssueIds: readonly string[];
+  now: Date;
+  wakes: BlockersResolvedWakeHistoryRow[];
+  pendingHumanOnlyInteraction: boolean;
+  pendingLinkedApproval: boolean;
+}): IssueBlockersResolvedWakeSuppression | null {
+  if (input.pendingHumanOnlyInteraction || input.pendingLinkedApproval) {
+    return { reason: "human_gate" };
+  }
+
+  const forDependent = input.wakes.filter(
+    (wake) => wakePayloadIssueId(wake.payload) === input.dependentIssueId,
+  );
+
+  if (input.source === "issue.blockers_restored") {
+    const since = input.now.getTime() - ISSUE_BLOCKERS_RESOLVED_RESTORED_DEDUP_MS;
+    const covered = forDependent.some((wake) => {
+      if (wake.status !== "completed") return false;
+      if (wake.requestedAt.getTime() < since) return false;
+      const ids = wakePayloadBlockerIds(wake.payload);
+      return ids !== null && sameBlockerIssueIdSet(ids, input.blockerIssueIds);
+    });
+    if (covered) return { reason: "recent_same_set" };
+  }
+
+  const hourStart = input.now.getTime() - ISSUE_BLOCKERS_RESOLVED_WAKE_HOUR_MS;
+  const count = forDependent.filter((wake) => {
+    if (NON_COUNTING_WAKE_STATUSES.has(wake.status)) return false;
+    return wake.requestedAt.getTime() >= hourStart;
+  }).length;
+  if (count >= ISSUE_BLOCKERS_RESOLVED_WAKE_HOURLY_CAP) {
+    return { reason: "hourly_cap", count };
+  }
+  return null;
 }
 
 function hashBlockerReadyStateDigest(sortedBlockerIssueIds: string[], cycle: string | null): string {
@@ -236,4 +379,70 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
     }),
   );
   return covering ?? null;
+}
+
+export async function findIssueBlockersResolvedWakeSuppression(
+  db: Db,
+  input: {
+    companyId: string;
+    dependentIssueId: string;
+    blockerIssueIds: string[];
+    source: string;
+    now?: Date;
+  },
+): Promise<IssueBlockersResolvedWakeSuppression | null> {
+  const now = input.now ?? new Date();
+  const since = new Date(now.getTime() - ISSUE_BLOCKERS_RESOLVED_RESTORED_DEDUP_MS);
+  const [wakes, humanOnly, pendingApproval] = await Promise.all([
+    db
+      .select({
+        status: agentWakeupRequests.status,
+        requestedAt: agentWakeupRequests.requestedAt,
+        payload: agentWakeupRequests.payload,
+      })
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, input.companyId),
+          eq(agentWakeupRequests.reason, ISSUE_BLOCKERS_RESOLVED_WAKE_REASON),
+          gte(agentWakeupRequests.requestedAt, since),
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${input.dependentIssueId}`,
+        ),
+      ),
+    db
+      .select({ id: issueThreadInteractions.id })
+      .from(issueThreadInteractions)
+      .where(
+        and(
+          eq(issueThreadInteractions.companyId, input.companyId),
+          eq(issueThreadInteractions.issueId, input.dependentIssueId),
+          eq(issueThreadInteractions.status, "pending"),
+          eq(issueThreadInteractions.effectiveResolverPolicy, "human_only"),
+        ),
+      )
+      .limit(1),
+    db
+      .select({ id: approvals.id })
+      .from(issueApprovals)
+      .innerJoin(approvals, eq(approvals.id, issueApprovals.approvalId))
+      .where(
+        and(
+          eq(issueApprovals.companyId, input.companyId),
+          eq(issueApprovals.issueId, input.dependentIssueId),
+          eq(approvals.companyId, input.companyId),
+          eq(approvals.status, "pending"),
+        ),
+      )
+      .limit(1),
+  ]);
+
+  return suppressionForBlockersResolvedWakeHistory({
+    source: input.source,
+    dependentIssueId: input.dependentIssueId,
+    blockerIssueIds: input.blockerIssueIds,
+    now,
+    wakes,
+    pendingHumanOnlyInteraction: humanOnly.length > 0,
+    pendingLinkedApproval: pendingApproval.length > 0,
+  });
 }
