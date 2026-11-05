@@ -15,7 +15,7 @@ export function installTransactionGuard<T extends Connection>(
 ): T {
   if (options.warnAfterMs <= 0) return db;
   const transaction = db.transaction;
-  db.transaction = function (callback: (...args: any[]) => Promise<any>, ...rest: any[]) {
+  db.transaction = function (this: T, callback: (...args: any[]) => Promise<any>, ...rest: any[]) {
     const holder: { stack?: string } = {};
     const previousLimit = Error.stackTraceLimit;
     Error.stackTraceLimit = STACK_FRAMES;
