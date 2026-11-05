@@ -2103,16 +2103,20 @@ export async function commitNativeStatusDecision(input: {
               }
             : null;
         if (!isCompletedChildParent) {
+          // A failed statement aborts the status transaction. Keep the gate in a
+          // savepoint so a query or audit-log error does not roll the commit back.
           let suppression: Awaited<
             ReturnType<typeof findIssueBlockersResolvedWakeSuppression>
           > = null;
           try {
-            suppression = await findIssueBlockersResolvedWakeSuppression(tx as unknown as Db, {
-              companyId: input.companyId,
-              dependentIssueId: dependent.id,
-              blockerIssueIds: dependent.blockerIssueIds,
-              source: "issue.blockers_resolved",
-            });
+            suppression = await tx.transaction((savepoint) =>
+              findIssueBlockersResolvedWakeSuppression(savepoint as unknown as Db, {
+                companyId: input.companyId,
+                dependentIssueId: dependent.id,
+                blockerIssueIds: dependent.blockerIssueIds,
+                source: "issue.blockers_resolved",
+              }),
+            );
           } catch (err) {
             logger.warn(
               { err, issueId: dependent.id, source: "issue.blockers_resolved" },
@@ -2122,20 +2126,24 @@ export async function commitNativeStatusDecision(input: {
           if (suppression) {
             if (suppression.reason === "hourly_cap") {
               try {
-                await logActivity(tx as unknown as Db, {
-                  companyId: input.companyId,
-                  actorType: "system",
-                  actorId: "native_status_commit",
-                  agentId: dependent.assigneeAgentId,
-                  action: ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
-                  entityType: "issue",
-                  entityId: dependent.id,
-                  details: {
-                    reason: suppression.reason,
-                    count: suppression.count ?? null,
-                    source: "issue.blockers_resolved",
-                  },
-                });
+                const staged: ActivityPublication[] = [];
+                await tx.transaction((savepoint) =>
+                  logActivity(savepoint as unknown as Db, {
+                    companyId: input.companyId,
+                    actorType: "system",
+                    actorId: "native_status_commit",
+                    agentId: dependent.assigneeAgentId,
+                    action: ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
+                    entityType: "issue",
+                    entityId: dependent.id,
+                    details: {
+                      reason: suppression.reason,
+                      count: suppression.count ?? null,
+                      source: "issue.blockers_resolved",
+                    },
+                  }, staged),
+                );
+                publications.push(...staged);
               } catch (err) {
                 logger.warn(
                   { err, issueId: dependent.id },
