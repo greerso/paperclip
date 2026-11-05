@@ -29,7 +29,12 @@ export function installTransactionGuard<T extends Connection>(
       );
     }, options.warnAfterMs);
     timer.unref();
-    return transaction.call(this, callback, ...rest).finally(() => clearTimeout(timer));
+    try {
+      return transaction.call(this, callback, ...rest).finally(() => clearTimeout(timer));
+    } catch (error) {
+      clearTimeout(timer);
+      throw error;
+    }
   } as T["transaction"];
   return db;
 }
