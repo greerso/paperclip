@@ -15412,15 +15412,25 @@ export function issueRoutes(
               "failed to check existing dependency wake before issue update wake",
             );
           }
+          let suppression: Awaited<
+            ReturnType<typeof findIssueBlockersResolvedWakeSuppression>
+          > = null;
           try {
-            const suppression = await findIssueBlockersResolvedWakeSuppression(db, {
+            suppression = await findIssueBlockersResolvedWakeSuppression(db, {
               companyId: issue.companyId,
               dependentIssueId: input.dependentIssueId,
               blockerIssueIds: input.blockerIssueIds,
               source: input.source,
             });
-            if (suppression) {
-              if (suppression.reason === "hourly_cap") {
+          } catch (err) {
+            logger.warn(
+              { err, issueId: input.dependentIssueId, idempotencyKey },
+              "failed to check blockers-resolved wake suppression before issue update wake",
+            );
+          }
+          if (suppression) {
+            if (suppression.reason === "hourly_cap") {
+              try {
                 await logActivity(db, {
                   companyId: issue.companyId,
                   actorType: "system",
@@ -15437,14 +15447,14 @@ export function issueRoutes(
                     source: input.source,
                   },
                 });
+              } catch (err) {
+                logger.warn(
+                  { err, issueId: input.dependentIssueId, idempotencyKey },
+                  "failed to log blockers-resolved wake suppression before issue update wake",
+                );
               }
-              return;
             }
-          } catch (err) {
-            logger.warn(
-              { err, issueId: input.dependentIssueId, idempotencyKey },
-              "failed to check blockers-resolved wake suppression before issue update wake",
-            );
+            return;
           }
           addWakeup(input.agentId, {
             source: "automation",
@@ -18948,15 +18958,25 @@ export function issueRoutes(
               "failed to check existing dependency wake before issue comment wake",
             );
           }
+          let suppression: Awaited<
+            ReturnType<typeof findIssueBlockersResolvedWakeSuppression>
+          > = null;
           try {
-            const suppression = await findIssueBlockersResolvedWakeSuppression(db, {
+            suppression = await findIssueBlockersResolvedWakeSuppression(db, {
               companyId: currentIssue.companyId,
               dependentIssueId: input.dependentIssueId,
               blockerIssueIds: input.blockerIssueIds,
               source: "issue.blockers_resolved",
             });
-            if (suppression) {
-              if (suppression.reason === "hourly_cap") {
+          } catch (err) {
+            logger.warn(
+              { err, issueId: input.dependentIssueId, idempotencyKey },
+              "failed to check blockers-resolved wake suppression before issue comment wake",
+            );
+          }
+          if (suppression) {
+            if (suppression.reason === "hourly_cap") {
+              try {
                 await logActivity(db, {
                   companyId: currentIssue.companyId,
                   actorType: "system",
@@ -18973,14 +18993,14 @@ export function issueRoutes(
                     source: "issue.blockers_resolved",
                   },
                 });
+              } catch (err) {
+                logger.warn(
+                  { err, issueId: input.dependentIssueId, idempotencyKey },
+                  "failed to log blockers-resolved wake suppression before issue comment wake",
+                );
               }
-              return;
             }
-          } catch (err) {
-            logger.warn(
-              { err, issueId: input.dependentIssueId, idempotencyKey },
-              "failed to check blockers-resolved wake suppression before issue comment wake",
-            );
+            return;
           }
           addWakeup(input.agentId, {
             source: "automation",

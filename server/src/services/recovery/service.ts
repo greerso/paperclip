@@ -5772,21 +5772,28 @@ export function recoveryService(
         });
         if (suppression) {
           if (suppression.reason === "hourly_cap") {
-            await logActivity(db, {
-              companyId,
-              actorType: "system",
-              actorId: "issue_graph_liveness_backstop",
-              agentId,
-              runId: opts?.runId ?? null,
-              action: ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
-              entityType: "issue",
-              entityId: candidate.id,
-              details: {
-                reason: suppression.reason,
-                count: suppression.count ?? null,
-                source,
-              },
-            });
+            try {
+              await logActivity(db, {
+                companyId,
+                actorType: "system",
+                actorId: "issue_graph_liveness_backstop",
+                agentId,
+                runId: opts?.runId ?? null,
+                action: ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
+                entityType: "issue",
+                entityId: candidate.id,
+                details: {
+                  reason: suppression.reason,
+                  count: suppression.count ?? null,
+                  source,
+                },
+              });
+            } catch (err) {
+              logger.warn(
+                { err, issueId: candidate.id, source },
+                "failed to log blockers-resolved wake suppression from issue graph liveness backstop",
+              );
+            }
             result.existingWakeSkipped += 1;
           } else if (suppression.reason === "human_gate") {
             result.interactionSkipped += 1;

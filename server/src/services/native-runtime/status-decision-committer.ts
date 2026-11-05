@@ -47,12 +47,18 @@ import {
 import { issueService } from "../issues.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
-import { buildIssueBlockersResolvedWakeIdempotencyKey } from "../issue-dependency-wakeups.js";
 import {
+  buildIssueBlockersResolvedWakeIdempotencyKey,
+  findIssueBlockersResolvedWakeSuppression,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
+} from "../issue-dependency-wakeups.js";
+import {
+  logActivity,
   persistActivity,
   publishActivity,
   type ActivityPublication,
 } from "../activity-log.js";
+import { logger } from "../../middleware/logger.js";
 import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
 import { materializeNativeProviderCapacityRetry } from "./native-provider-capacity-retry.js";
 import { NATIVE_PROVIDER_OVERLOADED_CODE } from "./native-provider-failure.js";
@@ -2096,6 +2102,50 @@ export async function commitNativeStatusDecision(input: {
                 childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
               }
             : null;
+        if (!isCompletedChildParent) {
+          let suppression: Awaited<
+            ReturnType<typeof findIssueBlockersResolvedWakeSuppression>
+          > = null;
+          try {
+            suppression = await findIssueBlockersResolvedWakeSuppression(tx as unknown as Db, {
+              companyId: input.companyId,
+              dependentIssueId: dependent.id,
+              blockerIssueIds: dependent.blockerIssueIds,
+              source: "issue.blockers_resolved",
+            });
+          } catch (err) {
+            logger.warn(
+              { err, issueId: dependent.id, source: "issue.blockers_resolved" },
+              "failed to check blockers-resolved wake suppression before native status wake",
+            );
+          }
+          if (suppression) {
+            if (suppression.reason === "hourly_cap") {
+              try {
+                await logActivity(tx as unknown as Db, {
+                  companyId: input.companyId,
+                  actorType: "system",
+                  actorId: "native_status_commit",
+                  agentId: dependent.assigneeAgentId,
+                  action: ISSUE_BLOCKERS_RESOLVED_WAKE_SUPPRESSED_ACTION,
+                  entityType: "issue",
+                  entityId: dependent.id,
+                  details: {
+                    reason: suppression.reason,
+                    count: suppression.count ?? null,
+                    source: "issue.blockers_resolved",
+                  },
+                });
+              } catch (err) {
+                logger.warn(
+                  { err, issueId: dependent.id },
+                  "failed to log blockers-resolved wake suppression before native status wake",
+                );
+              }
+            }
+            continue;
+          }
+        }
         const wakeId = await enqueueWake({
           tx: tx as unknown as Db,
           companyId: input.companyId,
