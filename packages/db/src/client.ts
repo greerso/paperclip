@@ -203,14 +203,18 @@ function envPositiveInteger(env: NodeJS.ProcessEnv, name: string): number | unde
   return Number.parseInt(value, 10);
 }
 
-function envNonNegativeInteger(env: NodeJS.ProcessEnv, name: string): number | undefined {
+function envNonNegativeInteger(env: NodeJS.ProcessEnv, name: string, max = Number.MAX_SAFE_INTEGER): number | undefined {
   const value = env[name]?.trim();
   if (value === undefined || value === "") return undefined;
   if (!/^(?:0|[1-9]\d*)$/.test(value)) {
     throw new Error(`${name} must be a non-negative integer, got: ${env[name]}`);
   }
+  if (Number.parseInt(value, 10) > max) throw new Error(`${name} must be at most ${max}, got: ${env[name]}`);
   return Number.parseInt(value, 10);
 }
+
+/** PostgreSQL millisecond GUCs and Node timers both cap at a signed 32-bit int. */
+const MAX_INT32_MS = 2_147_483_647;
 
 function envNonEmptyString(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const value = env[name]?.trim();
@@ -241,17 +245,20 @@ export function databaseClientOptionsFromEnv(env: NodeJS.ProcessEnv = process.en
   if (maxLifetimeSeconds !== undefined) options.maxLifetimeSeconds = maxLifetimeSeconds;
   const applicationName = envNonEmptyString(env, "DATABASE_APPLICATION_NAME");
   if (applicationName !== undefined) options.applicationName = applicationName;
-  const idleInTransactionTimeoutMs = envNonNegativeInteger(env, "DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS");
+  const idleInTransactionTimeoutMs = envNonNegativeInteger(env, "DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS", MAX_INT32_MS);
   if (idleInTransactionTimeoutMs !== undefined) options.idleInTransactionTimeoutMs = idleInTransactionTimeoutMs;
-  const longTransactionWarnMs = envNonNegativeInteger(env, "DATABASE_LONG_TRANSACTION_WARN_MS");
+  const longTransactionWarnMs = envNonNegativeInteger(env, "DATABASE_LONG_TRANSACTION_WARN_MS", MAX_INT32_MS);
   if (longTransactionWarnMs !== undefined) options.longTransactionWarnMs = longTransactionWarnMs;
   return options;
 }
 
 /**
  * Fills in Paperclip's defaults for the options the caller left unset: idle
- * connections are reaped after `DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS`, and the
- * pool identifies itself as `DEFAULT_DATABASE_APPLICATION_NAME`. Everything
+ * connections are reaped after `DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS`, the
+ * pool identifies itself as `DEFAULT_DATABASE_APPLICATION_NAME`, the server
+ * ends sessions idle in a transaction after
+ * `DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS`, and transactions open past
+ * `DEFAULT_LONG_TRANSACTION_WARN_MS` emit a warning. Everything
  * else stays at the driver default. An explicit value (including
  * `idleTimeoutSeconds: 0`) always wins over the default.
  */
@@ -273,10 +280,12 @@ export function postgresJsOptions(options: DatabaseClientOptions): Record<string
   if (options.idleTimeoutSeconds !== undefined) driverOptions.idle_timeout = options.idleTimeoutSeconds;
   if (options.connectTimeoutSeconds !== undefined) driverOptions.connect_timeout = options.connectTimeoutSeconds;
   if (options.maxLifetimeSeconds !== undefined) driverOptions.max_lifetime = options.maxLifetimeSeconds;
-  const connection: Record<string, string | number> = {};
+  const connection: Record<string, string> = {};
   if (options.applicationName !== undefined) connection.application_name = options.applicationName;
+  // A string, because postgres.js omits falsy startup parameters: a numeric 0
+  // would never reach the server, so the role/database setting would apply.
   if (options.idleInTransactionTimeoutMs !== undefined) {
-    connection.idle_in_transaction_session_timeout = options.idleInTransactionTimeoutMs;
+    connection.idle_in_transaction_session_timeout = String(options.idleInTransactionTimeoutMs);
   }
   if (Object.keys(connection).length > 0) driverOptions.connection = connection;
   return driverOptions;

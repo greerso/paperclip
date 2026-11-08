@@ -15,12 +15,12 @@ export function installTransactionGuard<T extends Connection>(
 ): T {
   if (options.warnAfterMs <= 0) return db;
   const transaction = db.transaction;
-  db.transaction = function (this: T, callback: (...args: any[]) => Promise<any>, ...rest: any[]) {
+  db.transaction = async function guardedTransaction(this: T, callback: (...args: any[]) => Promise<any>, ...rest: any[]) {
     const holder: { stack?: string } = {};
     const previousLimit = Error.stackTraceLimit;
     Error.stackTraceLimit = STACK_FRAMES;
-    Error.captureStackTrace(holder, db.transaction);
-    Error.stackTraceLimit = previousLimit;
+    try { Error.captureStackTrace(holder, guardedTransaction); }
+    finally { Error.stackTraceLimit = previousLimit; }
     const openedAt = Date.now();
     const timer = setTimeout(() => {
       process.emitWarning(
@@ -29,12 +29,8 @@ export function installTransactionGuard<T extends Connection>(
       );
     }, options.warnAfterMs);
     timer.unref();
-    try {
-      return transaction.call(this, callback, ...rest).finally(() => clearTimeout(timer));
-    } catch (error) {
-      clearTimeout(timer);
-      throw error;
-    }
+    try { return await transaction.call(this, callback, ...rest); }
+    finally { clearTimeout(timer); }
   } as T["transaction"];
   return db;
 }

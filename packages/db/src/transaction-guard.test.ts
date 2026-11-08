@@ -40,6 +40,19 @@ describe("installTransactionGuard", () => {
     warn.mockRestore();
   });
 
+  it("clears the timer when the wrapped transaction throws synchronously", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
+    const db = installTransactionGuard(
+      { transaction: (() => { throw new Error("sync"); }) as (callback: () => Promise<unknown>) => Promise<unknown> },
+      { warnAfterMs: 1000, label: "test-pool" },
+    );
+    await expect(db.transaction(async () => "ok")).rejects.toThrow("sync");
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it("is a no-op when disabled", () => {
     const db = fakeDb((callback) => callback());
     const original = db.transaction;
