@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_DATABASE_APPLICATION_NAME,
+  DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS,
   DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS,
   databaseClientOptionsFromEnv,
   postgresJsOptions,
   resolveDatabaseClientOptions,
 } from "./client.js";
+import { DEFAULT_LONG_TRANSACTION_WARN_MS } from "./transaction-guard.js";
 
 describe("databaseClientOptionsFromEnv", () => {
   it("returns no options when nothing is set, preserving driver defaults", () => {
@@ -100,10 +102,15 @@ describe("resolveDatabaseClientOptions", () => {
     expect(resolveDatabaseClientOptions({})).toEqual({
       idleTimeoutSeconds: DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS,
       applicationName: DEFAULT_DATABASE_APPLICATION_NAME,
+      idleInTransactionTimeoutMs: DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS,
+      longTransactionWarnMs: DEFAULT_LONG_TRANSACTION_WARN_MS,
     });
     expect(postgresJsOptions(resolveDatabaseClientOptions(databaseClientOptionsFromEnv({})))).toEqual({
       idle_timeout: DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS,
-      connection: { application_name: DEFAULT_DATABASE_APPLICATION_NAME },
+      connection: {
+        application_name: DEFAULT_DATABASE_APPLICATION_NAME,
+        idle_in_transaction_session_timeout: String(DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS),
+      },
     });
   });
 
@@ -114,9 +121,45 @@ describe("resolveDatabaseClientOptions", () => {
         idleTimeoutSeconds: 0,
         applicationName: "paperclip-cli",
       }),
-    ).toEqual({ maxConnections: 3, idleTimeoutSeconds: 0, applicationName: "paperclip-cli" });
+    ).toEqual({
+      maxConnections: 3,
+      idleTimeoutSeconds: 0,
+      applicationName: "paperclip-cli",
+      idleInTransactionTimeoutMs: DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS,
+      longTransactionWarnMs: DEFAULT_LONG_TRANSACTION_WARN_MS,
+    });
     expect(postgresJsOptions(resolveDatabaseClientOptions({ idleTimeoutSeconds: 0 }))).toMatchObject({
       idle_timeout: 0,
     });
+  });
+});
+
+describe("idle-in-transaction safeguard", () => {
+  it("parses the env settings, with 0 meaning an explicit disable", () => {
+    expect(
+      databaseClientOptionsFromEnv({
+        DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS: "0",
+        DATABASE_LONG_TRANSACTION_WARN_MS: "10000",
+      }),
+    ).toEqual({ idleInTransactionTimeoutMs: 0, longTransactionWarnMs: 10000 });
+    expect(() => databaseClientOptionsFromEnv({ DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS: "-1" })).toThrow(
+      /DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS/,
+    );
+    // PostgreSQL rejects a startup value above INT_MAX ms, and Node fires an
+    // overflowing setTimeout after 1ms.
+    expect(() => databaseClientOptionsFromEnv({ DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS: "2147483648" })).toThrow(
+      /DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS must be at most/,
+    );
+    expect(() => databaseClientOptionsFromEnv({ DATABASE_LONG_TRANSACTION_WARN_MS: "2147483648" })).toThrow(
+      /DATABASE_LONG_TRANSACTION_WARN_MS must be at most/,
+    );
+  });
+
+  it("sends the timeout as a startup parameter, including an explicit 0", () => {
+    // postgres.js drops falsy startup values, so 0 must travel as "0".
+    expect(postgresJsOptions({ idleInTransactionTimeoutMs: 0 })).toEqual({
+      connection: { idle_in_transaction_session_timeout: "0" },
+    });
+    expect(postgresJsOptions({})).toEqual({});
   });
 });

@@ -483,6 +483,8 @@ DATABASE_IDLE_TIMEOUT_SECONDS=60     # close idle pooled connections; default: 6
 DATABASE_CONNECT_TIMEOUT_SECONDS=10  # default: 30
 DATABASE_MAX_LIFETIME_SECONDS=1800   # recycle a pooled connection after this long; default: 30-60 min (random)
 DATABASE_APPLICATION_NAME=paperclip  # application_name in pg_stat_activity; default: paperclip
+DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS=300000  # server ends a session idle in a transaction; default: 300000 (0 = disabled)
+DATABASE_LONG_TRANSACTION_WARN_MS=30000         # warn with the opening stack; default: 30000 (0 = disabled)
 ```
 
 An explicit `DATABASE_PREPARED_STATEMENTS=true` enables named prepared statements

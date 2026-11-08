@@ -4,6 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { installDatabaseWorkSignals } from "./work-signals.js";
+import { DEFAULT_LONG_TRANSACTION_WARN_MS, installTransactionGuard } from "./transaction-guard.js";
 import { installDatabaseResponseCapture } from "./response-capture.js";
 import { installPreparedQueries } from "./prepared-queries.js";
 import * as schema from "./schema/index.js";
@@ -156,6 +157,17 @@ export interface DatabaseClientOptions {
    * `postgres.js`).
    */
   applicationName?: string;
+  /**
+   * PostgreSQL `idle_in_transaction_session_timeout` in milliseconds, sent as a
+   * startup parameter so the server ends a session whose transaction was
+   * opened and never finished. `0` sends an explicit "disabled" (for a pool
+   * that holds a transaction open on purpose). `createDb` fills in
+   * `DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS` when unset, and a startup
+   * parameter overrides any role or database setting.
+   */
+  idleInTransactionTimeoutMs?: number;
+  /** Warn, with the opening stack, when an outermost transaction stays open this long (0 disables). */
+  longTransactionWarnMs?: number;
 }
 
 /**
@@ -166,6 +178,12 @@ export interface DatabaseClientOptions {
  * to restore the driver default.
  */
 export const DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS = 60;
+/**
+ * A session idle inside a transaction this long is ended by the server unless
+ * `DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS` says otherwise (`0` disables). A
+ * leaked transaction otherwise pins one pooled backend forever.
+ */
+export const DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS = 300_000;
 /** `application_name` reported to PostgreSQL unless `DATABASE_APPLICATION_NAME` overrides it. */
 export const DEFAULT_DATABASE_APPLICATION_NAME = "paperclip";
 
@@ -186,14 +204,18 @@ function envPositiveInteger(env: NodeJS.ProcessEnv, name: string): number | unde
   return Number.parseInt(value, 10);
 }
 
-function envNonNegativeInteger(env: NodeJS.ProcessEnv, name: string): number | undefined {
+function envNonNegativeInteger(env: NodeJS.ProcessEnv, name: string, max = Number.MAX_SAFE_INTEGER): number | undefined {
   const value = env[name]?.trim();
   if (value === undefined || value === "") return undefined;
   if (!/^(?:0|[1-9]\d*)$/.test(value)) {
     throw new Error(`${name} must be a non-negative integer, got: ${env[name]}`);
   }
+  if (Number.parseInt(value, 10) > max) throw new Error(`${name} must be at most ${max}, got: ${env[name]}`);
   return Number.parseInt(value, 10);
 }
+
+/** PostgreSQL millisecond GUCs and Node timers both cap at a signed 32-bit int. */
+const MAX_INT32_MS = 2_147_483_647;
 
 function envNonEmptyString(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const value = env[name]?.trim();
@@ -224,13 +246,20 @@ export function databaseClientOptionsFromEnv(env: NodeJS.ProcessEnv = process.en
   if (maxLifetimeSeconds !== undefined) options.maxLifetimeSeconds = maxLifetimeSeconds;
   const applicationName = envNonEmptyString(env, "DATABASE_APPLICATION_NAME");
   if (applicationName !== undefined) options.applicationName = applicationName;
+  const idleInTransactionTimeoutMs = envNonNegativeInteger(env, "DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS", MAX_INT32_MS);
+  if (idleInTransactionTimeoutMs !== undefined) options.idleInTransactionTimeoutMs = idleInTransactionTimeoutMs;
+  const longTransactionWarnMs = envNonNegativeInteger(env, "DATABASE_LONG_TRANSACTION_WARN_MS", MAX_INT32_MS);
+  if (longTransactionWarnMs !== undefined) options.longTransactionWarnMs = longTransactionWarnMs;
   return options;
 }
 
 /**
  * Fills in Paperclip's defaults for the options the caller left unset: idle
- * connections are reaped after `DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS`, and the
- * pool identifies itself as `DEFAULT_DATABASE_APPLICATION_NAME`. Everything
+ * connections are reaped after `DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS`, the
+ * pool identifies itself as `DEFAULT_DATABASE_APPLICATION_NAME`, the server
+ * ends sessions idle in a transaction after
+ * `DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS`, and transactions open past
+ * `DEFAULT_LONG_TRANSACTION_WARN_MS` emit a warning. Everything
  * else stays at the driver default. An explicit value (including
  * `idleTimeoutSeconds: 0`) always wins over the default.
  */
@@ -239,6 +268,9 @@ export function resolveDatabaseClientOptions(options: DatabaseClientOptions): Da
     ...options,
     idleTimeoutSeconds: options.idleTimeoutSeconds ?? DEFAULT_DATABASE_IDLE_TIMEOUT_SECONDS,
     applicationName: options.applicationName ?? DEFAULT_DATABASE_APPLICATION_NAME,
+    idleInTransactionTimeoutMs:
+      options.idleInTransactionTimeoutMs ?? DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS,
+    longTransactionWarnMs: options.longTransactionWarnMs ?? DEFAULT_LONG_TRANSACTION_WARN_MS,
   };
 }
 
@@ -249,9 +281,14 @@ export function postgresJsOptions(options: DatabaseClientOptions): Record<string
   if (options.idleTimeoutSeconds !== undefined) driverOptions.idle_timeout = options.idleTimeoutSeconds;
   if (options.connectTimeoutSeconds !== undefined) driverOptions.connect_timeout = options.connectTimeoutSeconds;
   if (options.maxLifetimeSeconds !== undefined) driverOptions.max_lifetime = options.maxLifetimeSeconds;
-  if (options.applicationName !== undefined) {
-    driverOptions.connection = { application_name: options.applicationName };
+  const connection: Record<string, string> = {};
+  if (options.applicationName !== undefined) connection.application_name = options.applicationName;
+  // A string, because postgres.js omits falsy startup parameters: a numeric 0
+  // would never reach the server, so the role/database setting would apply.
+  if (options.idleInTransactionTimeoutMs !== undefined) {
+    connection.idle_in_transaction_session_timeout = String(options.idleInTransactionTimeoutMs);
   }
+  if (Object.keys(connection).length > 0) driverOptions.connection = connection;
   return driverOptions;
 }
 
@@ -334,9 +371,15 @@ function createDbClient(url: string, resolved: DatabaseClientOptions, owner?: ob
   // message cannot establish that replay is safe. Leave retries to callers
   // that know the complete operation is idempotent.
   const db = installDatabaseWorkSignals(drizzlePg(sql, { schema }), owner);
+  installTransactionGuard(db, {
+    warnAfterMs: resolved.longTransactionWarnMs ?? 0,
+    label: resolved.applicationName ?? DEFAULT_DATABASE_APPLICATION_NAME,
+  });
   installDatabaseResponseCapture(db, schema);
   dedicatedDbFactories.set(db, () => createDbClient(url, {
     ...resolved, maxConnections: 1, applicationName: "paperclip-workspace-finalization-lock",
+    // The advisory-lock transaction stays open, idle, for the whole guarded operation.
+    idleInTransactionTimeoutMs: 0, longTransactionWarnMs: 0,
   }, db));
   livenessDbFactories.set(db, () => createDbClient(url, {
     ...resolved, maxConnections: LIVENESS_POOL_MAX_CONNECTIONS, applicationName: "paperclip-controller-lease",
