@@ -161,8 +161,9 @@ export interface DatabaseClientOptions {
    * PostgreSQL `idle_in_transaction_session_timeout` in milliseconds, sent as a
    * startup parameter so the server ends a session whose transaction was
    * opened and never finished. `0` sends an explicit "disabled" (for a pool
-   * that holds a transaction open on purpose); unset sends nothing and the
-   * server default applies.
+   * that holds a transaction open on purpose). `createDb` fills in
+   * `DEFAULT_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS` when unset, and a startup
+   * parameter overrides any role or database setting.
    */
   idleInTransactionTimeoutMs?: number;
   /** Warn, with the opening stack, when an outermost transaction stays open this long (0 disables). */
