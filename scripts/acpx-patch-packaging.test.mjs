@@ -58,7 +58,7 @@ function esbuildFixture(t) {
 const codexTargets = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64"];
 const codexOptional = Object.fromEntries(codexTargets.map(target => [`@openai/codex-${target}`, `npm:@openai/codex@0.160.0-${target}`]));
 const claudeTargets = [...codexTargets, "linux-x64-musl", "linux-arm64-musl"];
-const claudeOptional = Object.fromEntries(claudeTargets.map(target => [`@anthropic-ai/claude-agent-sdk-${target}`, "0.3.286"]));
+const claudeOptional = Object.fromEntries(claudeTargets.map(target => [`@anthropic-ai/claude-agent-sdk-${target}`, "0.3.322"]));
 function claudeFixture(t) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "paperclip-bundled-claude-")));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -69,15 +69,15 @@ function claudeFixture(t) {
     return location;
   };
   const bridge = writePackage(join(graph, "@agentclientprotocol/claude-agent-acp"), {
-    name: "@agentclientprotocol/claude-agent-acp", version: "0.73.0", dependencies: { "@anthropic-ai/claude-agent-sdk": "0.3.286" },
+    name: "@agentclientprotocol/claude-agent-acp", version: "0.73.0", dependencies: { "@anthropic-ai/claude-agent-sdk": "0.3.322" },
   });
   writeFileSync(join(bridge, "index.js"), "export {};\n");
   const runtime = writePackage(join(graph, "@anthropic-ai/claude-agent-sdk"), {
-    name: "@anthropic-ai/claude-agent-sdk", version: "0.3.286", exports: { ".": "./sdk.mjs" }, optionalDependencies: claudeOptional,
+    name: "@anthropic-ai/claude-agent-sdk", version: "0.3.322", exports: { ".": "./sdk.mjs" }, optionalDependencies: claudeOptional,
   });
   writeFileSync(join(runtime, "sdk.mjs"), "// official JavaScript fixture, never executed\n");
   const producer = writePackage(join(graph, "@anthropic-ai/claude-agent-sdk-linux-x64"), {
-    name: "@anthropic-ai/claude-agent-sdk-linux-x64", version: "0.3.286", os: ["linux"], cpu: ["x64"],
+    name: "@anthropic-ai/claude-agent-sdk-linux-x64", version: "0.3.322", os: ["linux"], cpu: ["x64"],
   });
   writeFileSync(join(producer, "claude"), "producer native fixture, never executed");
   const profiles = [{ agent: "claude", ...profileData.profiles.claude }];
@@ -211,7 +211,7 @@ test("published Claude bridge pins its qualified SDK and provider dependency clo
     serverPackage.bundleDependencies, rootPackage, profileData,
   );
   assert.deepEqual(installManifest.overrides["@agentclientprotocol/claude-agent-acp@0.73.0"], {
-    "@anthropic-ai/claude-agent-sdk": "0.3.286",
+    "@anthropic-ai/claude-agent-sdk": "0.3.322",
     "@agentclientprotocol/sdk": "1.4.0",
     zod: "4.4.3",
   });

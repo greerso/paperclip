@@ -879,7 +879,7 @@ ACPX adapters receive the original response unchanged. Tool schemas and actions
 are forwarded without provider-specific translation.
 
 Provider-client smoke tests exercised native Codex 0.160.0 and Claude SDK
-0.3.286 with local MCP servers and loopback model APIs. This records the clients
+0.3.322 with local MCP servers and loopback model APIs. This records the clients
 used to verify image delivery and approvals; it is not an exhaustive adapter
 compatibility test.
 
